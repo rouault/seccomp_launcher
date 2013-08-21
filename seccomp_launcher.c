@@ -49,19 +49,9 @@
 
 #include "seccomp_launcher.h"
 
-#define HAVE_POSIX_SPAWNP
-
-#ifdef WIN32
-#include <windows.h>
-typedef HANDLE CPL_FILE_HANDLE;
-#define CPL_FILE_INVALID_HANDLE NULL
-typedef DWORD  CPL_PID;
-#else
-#include <sys/types.h>
 typedef int    CPL_FILE_HANDLE;
 #define CPL_FILE_INVALID_HANDLE -1
 typedef pid_t  CPL_PID;
-#endif
 
 #define IN_FOR_PARENT   0
 #define OUT_FOR_PARENT  1
@@ -191,10 +181,8 @@ struct _CPLSpawnedProcess
     CPL_FILE_HANDLE fin;
     CPL_FILE_HANDLE fout;
     CPL_FILE_HANDLE ferr;
-#ifdef HAVE_POSIX_SPAWNP
     int bFreeActions;
     posix_spawn_file_actions_t actions;
-#endif
 };
 
 /**
@@ -221,7 +209,7 @@ struct _CPLSpawnedProcess
  *
  * @since GDAL 1.10.0
  */
-CPLSpawnedProcess* CPLSpawnAsync(int (*pfnMain)(CPL_FILE_HANDLE, CPL_FILE_HANDLE),
+CPLSpawnedProcess* SeccompCPLSpawnAsync(int (*pfnMain)(CPL_FILE_HANDLE, CPL_FILE_HANDLE),
                                  const char * const papszArgv[],
                                  int bCreateInputPipe,
                                  int bCreateOutputPipe,
@@ -234,226 +222,109 @@ CPLSpawnedProcess* CPLSpawnAsync(int (*pfnMain)(CPL_FILE_HANDLE, CPL_FILE_HANDLE
     int pipe_err[2] = { -1, -1 };
     int i;
     char** papszArgvDup = CSLDuplicate((char**)papszArgv);
-    int bDup2In = bCreateInputPipe,
-        bDup2Out = bCreateOutputPipe,
-        bDup2Err = bCreateErrorPipe;
 
     if ((bCreateInputPipe && pipe(pipe_in)) ||
         (bCreateOutputPipe && pipe(pipe_out)) ||
         (bCreateErrorPipe && pipe(pipe_err)))
         goto err_pipe;
 
-    /* If we don't do any file actions, posix_spawnp() might be implemented */
-    /* efficiently as a vfork()/exec() pair (or if it is not available, we */
-    /* can use vfork()/exec()), so if the child is cooperative */
-    /* we pass the pipe handles as commandline arguments */
-    if( papszArgv != NULL )
+    int bHasActions = FALSE;
+    posix_spawn_file_actions_t actions;
+
+    if( bCreateInputPipe )
     {
-        for(i=0; papszArgvDup[i] != NULL; i++)
-        {
-            char buf[32];
-            if( bCreateInputPipe && strcmp(papszArgvDup[i], "{pipe_in}") == 0 )
-            {
-                CPLFree(papszArgvDup[i]);
-                sprintf(buf, "%d,%d",
-                    pipe_in[IN_FOR_PARENT], pipe_in[OUT_FOR_PARENT]);
-                papszArgvDup[i] = CPLStrdup(buf);
-                bDup2In = FALSE;
-            }
-            else if( bCreateOutputPipe && strcmp(papszArgvDup[i], "{pipe_out}") == 0 )
-            {
-                CPLFree(papszArgvDup[i]);
-                sprintf(buf, "%d,%d",
-                    pipe_out[OUT_FOR_PARENT], pipe_out[IN_FOR_PARENT]);
-                papszArgvDup[i] = CPLStrdup(buf);
-                bDup2Out = FALSE;
-            }
-            else if( bCreateErrorPipe && strcmp(papszArgvDup[i], "{pipe_err}") == 0 )
-            {
-                CPLFree(papszArgvDup[i]);
-                sprintf(buf, "%d,%d",
-                    pipe_err[OUT_FOR_PARENT], pipe_err[IN_FOR_PARENT]);
-                papszArgvDup[i] = CPLStrdup(buf);
-                bDup2Err = FALSE;
-            }
-        }
+        if( !bHasActions ) posix_spawn_file_actions_init(&actions);
+        posix_spawn_file_actions_adddup2(&actions, pipe_in[IN_FOR_PARENT], fileno(stdin));
+        posix_spawn_file_actions_addclose(&actions, pipe_in[OUT_FOR_PARENT]);
+        bHasActions = TRUE;
     }
 
-#ifdef HAVE_POSIX_SPAWNP
-    if( papszArgv != NULL )
+    if( bCreateOutputPipe )
     {
-        int bHasActions = FALSE;
-        posix_spawn_file_actions_t actions;
+        if( !bHasActions ) posix_spawn_file_actions_init(&actions);
+        posix_spawn_file_actions_adddup2(&actions, pipe_out[OUT_FOR_PARENT], fileno(stdout));
+        posix_spawn_file_actions_addclose(&actions, pipe_out[IN_FOR_PARENT]);
+        bHasActions = TRUE;
+    }
 
-        if( bCreateInputPipe )
-        {
-            if( !bHasActions ) posix_spawn_file_actions_init(&actions);
-            posix_spawn_file_actions_adddup2(&actions, pipe_in[IN_FOR_PARENT], fileno(stdin));
-            posix_spawn_file_actions_addclose(&actions, pipe_in[OUT_FOR_PARENT]);
-            bHasActions = TRUE;
-        }
+    if( bCreateErrorPipe )
+    {
+        if( !bHasActions ) posix_spawn_file_actions_init(&actions);
+        posix_spawn_file_actions_adddup2(&actions, pipe_err[OUT_FOR_PARENT], fileno(stderr));
+        posix_spawn_file_actions_addclose(&actions, pipe_err[IN_FOR_PARENT]);
+        bHasActions = TRUE;
+    }
 
-        if( bCreateOutputPipe )
-        {
-            if( !bHasActions ) posix_spawn_file_actions_init(&actions);
-            posix_spawn_file_actions_adddup2(&actions, pipe_out[OUT_FOR_PARENT], fileno(stdout));
-            posix_spawn_file_actions_addclose(&actions, pipe_out[IN_FOR_PARENT]);
-            bHasActions = TRUE;
-        }
+    char strpipe_in[32], strpipe_out[32];
+    sprintf(strpipe_in, "PIPE_IN=%d", pipe_in[IN_FOR_PARENT]);
+    sprintf(strpipe_out, "PIPE_OUT=%d", pipe_out[OUT_FOR_PARENT]);
 
-        if( bCreateErrorPipe )
-        {
-            if( !bHasActions ) posix_spawn_file_actions_init(&actions);
-            posix_spawn_file_actions_adddup2(&actions, pipe_err[OUT_FOR_PARENT], fileno(stderr));
-            posix_spawn_file_actions_addclose(&actions, pipe_err[IN_FOR_PARENT]);
-            bHasActions = TRUE;
-        }
-        
-        char strpipe_in[32], strpipe_out[32];
-        sprintf(strpipe_in, "PIPE_IN=%d,%d",
-                    pipe_in[IN_FOR_PARENT], pipe_in[OUT_FOR_PARENT]);
-        sprintf(strpipe_out, "PIPE_OUT=%d,%d",
-                    pipe_out[OUT_FOR_PARENT], pipe_out[IN_FOR_PARENT]);
+    /* Build LD_PRELOAD environmenet option */
+    char szSelfCWD[512];
+    int written = readlink("/proc/self/exe", szSelfCWD, sizeof(szSelfCWD)-1);
+    assert(written > 0);
+    szSelfCWD[written] = 0;
+    char* szLastSlash = strrchr(szSelfCWD, '/');
+    assert(szLastSlash);
+    szLastSlash[0] = '\0';
+    char szLibSeccompWrapper[1024];
+    sprintf(szLibSeccompWrapper, "%s/libseccomp_preload.so", szSelfCWD);
+    FILE* f = fopen(szLibSeccompWrapper, "rb");
+    assert(f);
+    fclose(f);
+    char szPreload[1024];
+    sprintf(szPreload, "LD_PRELOAD=%s", szLibSeccompWrapper);
+    // TODO check that libseccomp_wrapper.so is of the same architecture
+    // as the binary that will be launched with it.
 
-        int c = CSLCount(environ);
-        // TODO: check that LD_PRELOAD is not already defined
-        char** envp = (char**) malloc((c + 4) * sizeof(char*));
-        memcpy(envp, environ, c * sizeof(char*));
-        
-        char szSelfCWD[512];
-        assert(readlink("/proc/self/exe", szSelfCWD, sizeof(szSelfCWD)) > 0);
-        char* szLastSlash = strrchr(szSelfCWD, '/');
-        assert(szLastSlash);
-        szLastSlash[0] = '\0';
-        char szLibSeccompWrapper[1024];
-        sprintf(szLibSeccompWrapper, "%s/libseccomp_preload.so", szSelfCWD);
-        FILE* f = fopen(szLibSeccompWrapper, "rb");
-        assert(f);
-        fclose(f);
-        char szPreload[1024];
-        sprintf(szPreload, "LD_PRELOAD=%s", szLibSeccompWrapper);
-        // TODO check that libseccomp_wrapper.so is of the same architecture
-        // as the binary that will be launched with it.
+    /* Prepare the environment for the child */
+    int c = CSLCount(environ);
+    // TODO: check that LD_PRELOAD is not already defined
+    char** envp = (char**) CPLMalloc((c + 4) * sizeof(char*));
+    memcpy(envp, environ, c * sizeof(char*));
 
-        envp[c] = szPreload;
-        envp[c+1] = strpipe_in;
-        envp[c+2] = strpipe_out;
-        envp[c+3] = NULL;
+    envp[c] = szPreload;
+    envp[c+1] = strpipe_in;
+    envp[c+2] = strpipe_out;
+    envp[c+3] = NULL;
 
-        //const char const* envp[] = { "LD_PRELOAD=./libmylibc.so", strpipe_in, strpipe_out, NULL };
-
-        if( posix_spawnp(&pid, papszArgvDup[0],
-                         bHasActions ? &actions : NULL,
-                         NULL,
-                         (char* const*) papszArgvDup,
-                         (char* const*) envp) != 0 )
-        {
-            if( bHasActions )
-                posix_spawn_file_actions_destroy(&actions);
-            fprintf(stderr, "posix_spawnp() failed");
-            goto err;
-        }
-
-        CSLDestroy(papszArgvDup);
-
-        /* Close unused end of pipe */
-        if( bCreateInputPipe )
-            close(pipe_in[IN_FOR_PARENT]);
-        if( bCreateOutputPipe )
-            close(pipe_out[OUT_FOR_PARENT]);
-        if( bCreateErrorPipe )
-            close(pipe_err[OUT_FOR_PARENT]);
-
-        /* Ignore SIGPIPE */
-    #ifdef SIGPIPE
-        signal (SIGPIPE, SIG_IGN);
-    #endif
-        CPLSpawnedProcess* p = (CPLSpawnedProcess*)CPLMalloc(sizeof(CPLSpawnedProcess));
+    if( posix_spawnp(&pid, papszArgvDup[0],
+                        bHasActions ? &actions : NULL,
+                        NULL,
+                        (char* const*) papszArgvDup,
+                        (char* const*) envp) != 0 )
+    {
         if( bHasActions )
-            memcpy(&p->actions, &actions, sizeof(actions));
-        p->bFreeActions = bHasActions;
-        p->pid = pid;
-        p->fin = pipe_out[IN_FOR_PARENT];
-        p->fout = pipe_in[OUT_FOR_PARENT];
-        p->ferr = pipe_err[IN_FOR_PARENT];
-        return p;
-    }
-#endif // #ifdef HAVE_POSIX_SPAWNP
-
-#ifdef HAVE_VFORK
-    if( papszArgv != NULL && !bDup2In && !bDup2Out && !bDup2Err )
-        pid = vfork();
-    else
-#endif
-        pid = fork();
-    if (pid == 0)
-    {
-        /* Close unused end of pipe */
-        if( bDup2In )
-            close(pipe_in[OUT_FOR_PARENT]);
-        if( bDup2Out )
-            close(pipe_out[IN_FOR_PARENT]);
-        if( bDup2Err )
-            close(pipe_err[IN_FOR_PARENT]);
-
-#ifndef HAVE_POSIX_SPAWNP
-        if( papszArgv != NULL )
-        {
-            if( bDup2In )
-                dup2(pipe_in[IN_FOR_PARENT], fileno(stdin));
-            if( bDup2Out )
-                dup2(pipe_out[OUT_FOR_PARENT], fileno(stdout));
-            if( bDup2Err )
-                dup2(pipe_err[OUT_FOR_PARENT], fileno(stderr));
-
-            execvp(papszArgvDup[0], (char* const*) papszArgvDup);
-
-            _exit(1);
-        }
-        else
-#endif // HAVE_POSIX_SPAWNP
-        {
-            if( bCreateErrorPipe )
-                close(pipe_err[OUT_FOR_PARENT]);
-
-            int nRet = 0;
-            if (pfnMain != NULL)
-                nRet = pfnMain((bCreateInputPipe) ? pipe_in[IN_FOR_PARENT] : fileno(stdin),
-                               (bCreateOutputPipe) ? pipe_out[OUT_FOR_PARENT] : fileno(stdout));
-            _exit(nRet);
-        }
-    }
-    else if( pid > 0 )
-    {
-        CSLDestroy(papszArgvDup);
-
-        /* Close unused end of pipe */
-        if( bCreateInputPipe )
-            close(pipe_in[IN_FOR_PARENT]);
-        if( bCreateOutputPipe )
-            close(pipe_out[OUT_FOR_PARENT]);
-        if( bCreateErrorPipe )
-            close(pipe_err[OUT_FOR_PARENT]);
-
-        /* Ignore SIGPIPE */
-#ifdef SIGPIPE
-        signal (SIGPIPE, SIG_IGN);
-#endif
-        CPLSpawnedProcess* p = (CPLSpawnedProcess*)CPLMalloc(sizeof(CPLSpawnedProcess));
-#ifdef HAVE_POSIX_SPAWNP
-        p->bFreeActions = FALSE;
-#endif
-        p->pid = pid;
-        p->fin = pipe_out[IN_FOR_PARENT];
-        p->fout = pipe_in[OUT_FOR_PARENT];
-        p->ferr = pipe_err[IN_FOR_PARENT];
-        return p;
-    }
-    else
-    {
-        fprintf(stderr, "Fork failed");
+            posix_spawn_file_actions_destroy(&actions);
+        fprintf(stderr, "posix_spawnp() failed");
         goto err;
     }
+
+    CPLFree(envp);
+
+    CSLDestroy(papszArgvDup);
+
+    /* Close unused end of pipe */
+    if( bCreateInputPipe )
+        close(pipe_in[IN_FOR_PARENT]);
+    if( bCreateOutputPipe )
+        close(pipe_out[OUT_FOR_PARENT]);
+    if( bCreateErrorPipe )
+        close(pipe_err[OUT_FOR_PARENT]);
+
+    /* Ignore SIGPIPE */
+#ifdef SIGPIPE
+    signal (SIGPIPE, SIG_IGN);
+#endif
+    CPLSpawnedProcess* p = (CPLSpawnedProcess*)CPLMalloc(sizeof(CPLSpawnedProcess));
+    if( bHasActions )
+        memcpy(&p->actions, &actions, sizeof(actions));
+    p->bFreeActions = bHasActions;
+    p->pid = pid;
+    p->fin = pipe_out[IN_FOR_PARENT];
+    p->fout = pipe_in[OUT_FOR_PARENT];
+    p->ferr = pipe_err[IN_FOR_PARENT];
+    return p;
 
 err_pipe:
     fprintf(stderr, "Could not create pipe");
@@ -556,24 +427,51 @@ int CPLSpawnAsyncFinish(CPLSpawnedProcess* p, int bWait, int bKill)
     CPLSpawnAsyncCloseInputFileHandle(p);
     CPLSpawnAsyncCloseOutputFileHandle(p);
     CPLSpawnAsyncCloseErrorFileHandle(p);
-#ifdef HAVE_POSIX_SPAWNP
     if( p->bFreeActions )
         posix_spawn_file_actions_destroy(&p->actions);
-#endif
     CPLFree(p);
     return status;
 }
 
 static int child_fd[1024];
 
+static void Usage(char* argv[])
+{
+    printf("Usage: %s [-rw] a_binary option1...\n", argv[0]);
+    printf("\n");
+    printf("Options:\n");
+    printf(" -rw : turn sandbox in read/write mode.\n");
+    printf("\n");
+    exit(1);
+}
+
 int main(int argc, char* argv[])
 {
-    char** my_argv = (char**)malloc(sizeof(char*)* (argc+1));
-    memcpy(my_argv, argv+1, sizeof(char*)* (argc-1));
-    my_argv[argc] = 0;
-    CPLSpawnedProcess* sp = CPLSpawnAsync(NULL, my_argv, TRUE, TRUE, FALSE, NULL);
-    int bReadOnly = getenv("READONLY") != NULL;
+    int i;
+    int bReadOnly = TRUE;
+    for(i=1;i<argc;i++)
+    {
+        if( strcmp(argv[i], "-rw") == 0 )
+            bReadOnly = FALSE;
+        else if( argv[i][0] == '-' )
+        {
+            Usage(argv);
+        }
+        else
+            break;
+    }
     
+    if( argv[i] == NULL )
+        Usage(argv);
+
+    /* Prepare the argument command line for the child */
+    char** my_argv = (char**)CPLMalloc(sizeof(char*)* (argc-i+1));
+    memcpy(my_argv, argv+i, sizeof(char*)* (argc-i+1));
+    CPLSpawnedProcess* sp = SeccompCPLSpawnAsync(NULL, (const char* const*)my_argv,
+                                          TRUE, TRUE, FALSE, NULL);
+    CPLFree(my_argv);
+
+    /* Child file descriptors availability: register stdout(1) and stderr(2) */
     memset(child_fd, 0, sizeof(child_fd));
     child_fd[1] = 1;
     child_fd[2] = 1;

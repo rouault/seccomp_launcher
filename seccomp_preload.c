@@ -138,8 +138,6 @@ static void UNIMPLEMENTED(const char* pszMsg)
     DISPLAY("UNIMPLEMENTED", pszMsg);
 }
 
-#define UNIMPLEMENTED_FUNC() UNIMPLEMENTED(__FUNCTION__)
-
 //#define VERBOSE 1
 #if VERBOSE
 #define ENTER_FUNC() DISPLAY("ENTER", __FUNCTION__)
@@ -148,12 +146,17 @@ static void INFO(const char* pszMsg)
 {
     DISPLAY("INFO", pszMsg);
 }
+
+#define UNIMPLEMENTED_FUNC() UNIMPLEMENTED(__FUNCTION__)
+#define DUMMY_FUNC() DISPLAY("DUMMY_FUNC", __FUNCTION__)
+
 #else
 #define ENTER_FUNC()
 #define INFO(x)
-#endif
+#define UNIMPLEMENTED_FUNC()
+#define DUMMY_FUNC()
 
-#define DUMMY_FUNC() DISPLAY("DUMMY_FUNC", __FUNCTION__)
+#endif
 
 /* Used by dlmalloc() routines */
 void *my_sbrk(intptr_t increment)
@@ -627,10 +630,11 @@ __attribute__((constructor)) static void seccomp_preload_init()
         = (ssize_t (*)(const char *, char *, size_t)) dlsym(RTLD_NEXT, "readlink");
     assert(p_glibc_readlink);
     assert(p_glibc_readlink != readlink);
-    if( p_glibc_readlink("/proc/self/exe", szReadlinkSelf, sizeof(szReadlinkSelf)) < 0 )
-    {
-        szReadlinkSelf[0] = 0;
-    }
+    int readlink_ret = p_glibc_readlink(
+        "/proc/self/exe", szReadlinkSelf, sizeof(szReadlinkSelf) - 1);
+    if( readlink_ret <= 0 )
+        readlink_ret = 0;
+    szReadlinkSelf[readlink_ret] = 0;
 
     /* Read a few sysconf values */
     long int (*p_glibc_sysonf)(int) = (long int(*)(int)) dlsym(RTLD_NEXT, "sysconf");
@@ -813,10 +817,11 @@ ssize_t readlink(const char *path, char *buf, size_t bufsiz)
 {
     if( strcmp(path, "/proc/self/exe") == 0 )
     {
+        int szReadlinkSelfLen = (int)strlen(szReadlinkSelf);
         strncpy(buf, szReadlinkSelf, bufsiz);
         if( strlen(szReadlinkSelf) >= bufsiz )
             return -1;
-        return 0;
+        return szReadlinkSelfLen;
     }
     else
     {
@@ -864,7 +869,7 @@ char *getwd(char *buf)
 
 char *get_current_dir_name(void)
 {
-    ENTER_FUNC();;
+    ENTER_FUNC();
     return getcwd(NULL, 0);
 }
 

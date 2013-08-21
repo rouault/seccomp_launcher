@@ -14,6 +14,10 @@ if ! ./seccomp_launcher ./test3 test3.c >/dev/null 2>/dev/null; then
     echo "test3 failed"
     FAILED=1
 fi
+if ! ./seccomp_launcher ./test4 >/dev/null 2>/dev/null; then
+    echo "test4 failed"
+    FAILED=1
+fi
 
 if test "$FAILED" = "0"; then
     echo "Test finished successfully"

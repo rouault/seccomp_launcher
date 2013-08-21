@@ -29,5 +29,8 @@ test2: test2.c
 test3: test3.c
 	$(CC) test3.c -o test3
 
-check: all test1 test2 test3 
+test4: test4.c
+	$(CC) test4.c -o test4
+
+check: all test1 test2 test3 test4 
 	./run_tests.sh
