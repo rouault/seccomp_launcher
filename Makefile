@@ -30,6 +30,7 @@ test3: test3.c
 	$(CC) test3.c -o test3
 
 check: all test1 test2 test3 
+	strace -f ./seccomp_launcher ./test1
 	./seccomp_launcher ./test1 2>/dev/null
 	! ./seccomp_launcher ./test2  2>/dev/null
 	./seccomp_launcher ./test3 test3.c >/dev/null 2>/dev/null
