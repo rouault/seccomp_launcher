@@ -1,0 +1,12 @@
+# Travis-ci.org configuration file
+
+language: c
+
+compiler:
+  - gcc
+
+install:
+  - make
+
+script:
+  - make check
