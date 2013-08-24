@@ -473,6 +473,7 @@ int main(int argc, char* argv[])
 
     /* Child file descriptors availability: register stdout(1) and stderr(2) */
     memset(child_fd, 0, sizeof(child_fd));
+    child_fd[0] = 1;
     child_fd[1] = 1;
     child_fd[2] = 1;
 
@@ -654,6 +655,48 @@ int main(int argc, char* argv[])
             int ret = ftruncate64(fd, off);
             int myerrno = errno;
             /*fprintf(stderr, "server: ftruncate(%d,%lld) = %d\n", fd, off, ret);*/
+            write(sp->fout, &ret, 4);
+            if( ret < 0 )
+                write(sp->fout, &myerrno, 4);
+        }
+        else if( cmd == CMD_DUP )
+        {
+            int oldfd;
+            read(sp->fin, &oldfd, 4);
+            if( oldfd < 0 || oldfd >= 1024 || !child_fd[oldfd] )
+                oldfd = -1;
+            int newfd = dup(oldfd);
+            int myerrno = errno;
+            /*fprintf(stderr, "server: open(%s,%d,0%o) = %d\n", path, flags, mode, fd);*/
+            if( newfd >= 1024 )
+            {
+                close(newfd);
+                newfd = -1;
+                myerrno = ENFILE;
+            }
+            else if( newfd >= 0 )
+                child_fd[newfd] = 1;
+            write(sp->fout, &newfd, 4);
+            if( newfd < 0 )
+                write(sp->fout, &myerrno, 4);
+        }
+        else if( cmd == CMD_DUP2 )
+        {
+            int oldfd, newfd;
+            read(sp->fin, &oldfd, 4);
+            read(sp->fin, &newfd, 4);
+            if( oldfd < 0 || oldfd >= 1024 || !child_fd[oldfd] )
+                oldfd = -1;
+            if( newfd < 0 || newfd >= 1024 || !child_fd[newfd] )
+                newfd = -1;
+            int ret = dup2(oldfd, newfd);
+            int myerrno = errno;
+            /*fprintf(stderr, "server: open(%s,%d,0%o) = %d\n", path, flags, mode, fd);*/
+            if( ret >= 0 && oldfd != newfd )
+            {
+                child_fd[oldfd] = 0;
+                child_fd[newfd] = 1;
+            }
             write(sp->fout, &ret, 4);
             if( ret < 0 )
                 write(sp->fout, &myerrno, 4);

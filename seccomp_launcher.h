@@ -40,7 +40,9 @@ enum
     CMD_STAT,
     CMD_FSTAT,
     CMD_MKDIR,
-    CMD_FTRUNCATE
+    CMD_FTRUNCATE,
+    CMD_DUP,
+    CMD_DUP2,
 };
 
 #endif /*  GUARD_SECCOMP_WRAPPER_H */

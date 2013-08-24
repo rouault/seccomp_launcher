@@ -31,6 +31,8 @@
 #define _LARGEFILE64_SOURCE 1
 #define _GNU_SOURCE 1 /* RTLD_NEXT */
 
+/* #define VERBOSE 1 */
+
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/select.h>
@@ -40,6 +42,7 @@
 #include <sys/times.h>
 #include <sys/types.h>
 #include <sys/utsname.h>
+#include <sys/ioctl.h>
 
 #include <unistd.h>
 #include <stdlib.h>
@@ -55,6 +58,7 @@
 #include <dirent.h>
 #include <time.h>
 #include <wchar.h>
+#include <signal.h>
 
 #include "seccomp_launcher.h"
 
@@ -94,8 +98,8 @@ static int offsetstaticmemory = 0;
 static int val_SC_CLK_TCK = 0;
 static struct lconv* p_globale_locale = NULL;
 
-static char szCWD[2048] = { 0 };
-static char szReadlinkSelf[2048] = { 0 };
+static char szCWD[PATH_MAX] = { 0 };
+static char szReadlinkSelf[PATH_MAX] = { 0 };
 
 /* buffer should be at least 21 byte large (20 + 1) for a 64bit val */
 static void printuint(char* buffer, unsigned long long val)
@@ -312,7 +316,11 @@ typedef struct
 
 static Library libs[] =
 {
-    { "libproj.so", NULL }
+    { "libproj.so", NULL },
+    { "osgeo/_gdal.so", NULL },
+    { "osgeo/_gdalconst.so", NULL },
+    { "osgeo/_ogr.so", NULL },
+    { "osgeo/_osr.so", NULL }
 };
 
 #define N_LIBS (sizeof(libs) / sizeof(libs[0]))
@@ -327,6 +335,14 @@ typedef struct
 
 static Symbol syms[] =
 {
+    { "osgeo/_gdal.so", "init_gdal", NULL, NULL },
+    { "osgeo/_gdal.so", "PyInit__gdal", NULL, NULL },
+    { "osgeo/_gdalconst.so", "init_gdalconst", NULL, NULL },
+    { "osgeo/_gdalconst.so", "PyInit__gdalconst", NULL, NULL },
+    { "osgeo/_ogr.so", "init_ogr", NULL, NULL },
+    { "osgeo/_ogr.so", "PyInit__ogr", NULL, NULL },
+    { "osgeo/_osr.so", "init_osr", NULL, NULL },
+    { "osgeo/_osr.so", "PyInit__osr", NULL, NULL },
     { "libproj.so", "pj_init", NULL, NULL },
     { "libproj.so", "pj_init_plus", NULL, NULL },
     { "libproj.so", "pj_free", NULL, NULL },
@@ -346,6 +362,62 @@ static Symbol syms[] =
 static void resolveSyms(void)
 {
     size_t i, j;
+    char szPythonPath[256];
+    char szLocalPythonPath[256];
+    char* pythonpath = NULL;
+    char* pythonlocalpath = NULL;
+    if( strstr(szReadlinkSelf, "python") != NULL )
+    {
+        pythonpath = getenv("PYTHONPATH");
+        if( (pythonpath == NULL || *pythonpath == '\0') &&
+            strncmp(szReadlinkSelf, "/usr/bin/python", strlen("/usr/bin/python")) == 0 )
+        {
+            sprintf(szPythonPath, "/usr/lib/%s/dist-packages",
+                    szReadlinkSelf + strlen("/usr/bin/"));
+            pythonpath = szPythonPath;
+            sprintf(szLocalPythonPath, "/usr/local/lib/%s/dist-packages",
+                    szReadlinkSelf + strlen("/usr/bin/"));
+            pythonlocalpath = szLocalPythonPath;
+        }
+    }
+
+    for(i = 0; i < N_LIBS; i++)
+    {
+        if( strncmp(libs[i].pszLibName, "osgeo/", 6) == 0 )
+        {
+            char szPath[1024];
+            if( pythonpath != NULL && strlen(pythonpath) < 512 )
+            {
+                strcpy(szPath, pythonpath);
+                strcat(szPath, "/");
+                strcat(szPath, libs[i].pszLibName);
+                libs[i].pLibHandle = dlopen(szPath, RTLD_NOW);
+                if( libs[i].pLibHandle == NULL &&
+                    pythonlocalpath != NULL && strlen(pythonlocalpath) < 512  )
+                {
+                    strcpy(szPath, pythonlocalpath);
+                    strcat(szPath, "/");
+                    strcat(szPath, libs[i].pszLibName);
+                    libs[i].pLibHandle = dlopen(szPath, RTLD_NOW);
+                }
+            }
+            /*if( libs[i].pLibHandle == NULL )
+            {
+                fprintf(stderr, "Cannot dlopen(%s) : %s\n",
+                        libs[i].pszLibName, dlerror());
+            }*/
+        }
+        else
+        {
+            libs[i].pLibHandle = dlopen(libs[i].pszLibName, RTLD_NOW);
+            /*if( libs[i].pLibHandle == NULL )
+            {
+                fprintf(stderr, "Cannot dlopen(%s) : %s\n",
+                        libs[i].pszLibName, dlerror());
+            }*/
+        }
+    }
+
     for(i = 0; i < N_SYMS; i++)
     {
         void* pLibHandle = NULL;
@@ -354,11 +426,6 @@ static void resolveSyms(void)
             if( strcmp(syms[i].pszLibName, libs[j].pszLibName) == 0 )
             {
                 pLibHandle = libs[j].pLibHandle;
-                if( pLibHandle == NULL )
-                {
-                    libs[j].pLibHandle = dlopen(libs[j].pszLibName, RTLD_NOW);
-                    pLibHandle = libs[j].pLibHandle;
-                }
                 break;
             }
         }
@@ -381,13 +448,16 @@ static void* mydlopen (const char *file, int mode, void *dl_caller)
     size_t i;
     if( file != NULL )
     {
-        for(i = 0; i < N_SYMS; i++)
+        for(i = 0; i < N_LIBS; i++)
         {
-            if( strcmp(file, syms[i].pszLibName) == 0 )
+            if( strcmp(file, libs[i].pszLibName) == 0 ||
+                (strncmp(libs[i].pszLibName, "osgeo/", 6) == 0 &&
+                 strstr(file, libs[i].pszLibName) != NULL) )
             {
-                return syms[i].pLibHandle;
+                return libs[i].pLibHandle;
             }
         }
+        DISPLAY("cannot dlopen", file);
     }
     UNIMPLEMENTED_FUNC();
     return NULL;
@@ -612,9 +682,6 @@ __attribute__((constructor)) static void seccomp_preload_init()
     /* The size parameter must be at least 1024 */
     qsort((void*)0xDEADBEEF, 0, 1024, dummySortFunction);
 
-    /* Load proj.4 symbols */
-    resolveSyms();
-
     /* Fetch current working dir */
     char *(*p_glibc_getcwd)(char *buf, size_t size) =
         (char*(*)(char*,size_t))dlsym(RTLD_NEXT, "getcwd");
@@ -648,6 +715,16 @@ __attribute__((constructor)) static void seccomp_preload_init()
     p_globale_locale = p_glibc_localeconv();
     assert(p_globale_locale);
 
+        if( getenv("WAIT") != NULL )
+        {
+            unsigned int (*p_glibc_sleep)(unsigned int) =
+                (unsigned int(*)(unsigned int)) dlsym(RTLD_NEXT, "sleep");
+            p_glibc_sleep(10);
+        }
+
+    /* Load proj.4 and GDAL python bindings symbols */
+    resolveSyms();
+
     /* And now go at least in seccomp ! */
     if( getenv("DISABLE_SECCOMP") == NULL )
     {
@@ -659,7 +736,7 @@ __attribute__((constructor)) static void seccomp_preload_init()
     }
     else
     {
-        DISPLAY("INFO", "shoulde be PR_SET_SECCOMP mode, but no");
+        DISPLAY("INFO", "should be PR_SET_SECCOMP mode, but no");
     }
 
     bInSecomp = TRUE;
@@ -819,13 +896,13 @@ ssize_t readlink(const char *path, char *buf, size_t bufsiz)
     {
         int szReadlinkSelfLen = (int)strlen(szReadlinkSelf);
         strncpy(buf, szReadlinkSelf, bufsiz);
-        if( strlen(szReadlinkSelf) >= bufsiz )
-            return -1;
         return szReadlinkSelfLen;
     }
     else
     {
         UNIMPLEMENTED_FUNC();
+        DISPLAY("path", path);
+        errno = EINVAL;
         return -1;
     }
 }
@@ -864,13 +941,35 @@ char *getcwd(char *buf, size_t size)
 char *getwd(char *buf)
 {
     ENTER_FUNC();
-    return getcwd(buf, 256); /* should be PATH_MAX */
+    return getcwd(buf, PATH_MAX);
 }
 
 char *get_current_dir_name(void)
 {
     ENTER_FUNC();
     return getcwd(NULL, 0);
+}
+
+char *__realpath_chk(const char *path, char *resolved_path, size_t resolved_len)
+{
+    return realpath(path, resolved_path);
+}
+
+char *realpath(const char *path, char *resolved_path)
+{
+    ENTER_FUNC();
+    /* Not conformant: should remove ./, ../, resolve symlinks, etc... */
+    if( resolved_path == NULL )
+        resolved_path = (char*) malloc(PATH_MAX);
+    if( *path == '/' )
+        strcpy(resolved_path, path);
+    else
+    {
+        getcwd(resolved_path, PATH_MAX);
+        strcat(resolved_path, "/");
+        strcat(resolved_path, path);
+    }
+    return resolved_path;
 }
 
 int gethostname(char *name, size_t len)
@@ -950,6 +1049,30 @@ pid_t getppid(void)
     return 0;
 }
 
+uid_t getuid(void)
+{
+    DUMMY_FUNC();
+    return 1;
+}
+
+uid_t geteuid(void)
+{
+    DUMMY_FUNC();
+    return 1;
+}
+
+gid_t getgid(void)
+{
+    DUMMY_FUNC();
+    return 1;
+}
+
+gid_t getegid(void)
+{
+    DUMMY_FUNC();
+    return 1;
+}
+
 int select(int nfds, fd_set *readfds, fd_set *writefds,
             fd_set *exceptfds, struct timeval *timeout)
 {
@@ -1007,6 +1130,38 @@ static int myopen(const char *pathname, int flags, int mode)
     errno = myerrno;
 
     return fd;
+}
+
+
+int dup(int oldfd)
+{
+    ENTER_FUNC();
+    int cmd = CMD_DUP;
+    pipe_write(&cmd, 4);
+    pipe_write(&oldfd, 4);
+    int ret;
+    pipe_read(&ret, 4);
+    int myerrno = 0;
+    if( ret < 0 )
+        pipe_read(&myerrno, 4);
+    errno = myerrno;
+    return ret;
+}
+
+int dup2(int oldfd, int newfd)
+{
+    ENTER_FUNC();
+    int cmd = CMD_DUP2;
+    pipe_write(&cmd, 4);
+    pipe_write(&oldfd, 4);
+    pipe_write(&newfd, 4);
+    int ret;
+    pipe_read(&ret, 4);
+    int myerrno = 0;
+    if( ret < 0 )
+        pipe_read(&myerrno, 4);
+    errno = myerrno;
+    return ret;
 }
 
 int open(const char *pathname, int flags, ...)
@@ -1254,6 +1409,12 @@ int pthread_once(void* key, void (*pfn)(void))
     return 0;
 }
 
+int pthread_getattr_np(pthread_t thread, pthread_attr_t *attr)
+{
+    UNIMPLEMENTED_FUNC();
+    return -1;
+}
+
 int pthread_mutexattr_init()
 {
     /* FIXME! : we need UNIMPLEMENTED_FUNC() to make that work ! weird !! */
@@ -1295,6 +1456,32 @@ int pthread_attr_setschedpolicy()
 {
     /* DUMMY_FUNC(); */
     return 0;
+}
+
+int pthread_attr_setstack(pthread_attr_t *attr,
+                                 void *stackaddr, size_t stacksize)
+{
+    UNIMPLEMENTED_FUNC();
+    return -1;
+}
+
+int pthread_attr_getstack(pthread_attr_t *attr,
+                                 void **stackaddr, size_t *stacksize)
+{
+    UNIMPLEMENTED_FUNC();
+    return -1;
+}
+
+int pthread_attr_setstacksize()
+{
+    UNIMPLEMENTED_FUNC();
+    return -1;
+}
+
+int pthread_attr_setscope()
+{
+    UNIMPLEMENTED_FUNC();
+    return -1;
 }
 
 int pthread_mutex_init()
@@ -1388,10 +1575,18 @@ int pthread_detach()
     return 0;
 }
 
-int pthread_sigmask()
+int pthread_sigmask(int __how,
+                __const __sigset_t *__restrict __newmask,
+                __sigset_t *__restrict __oldmask)
 {
     /* DUMMY_FUNC(); */
     return 0;
+}
+
+int pthread_kill (pthread_t __threadid, int __signo)
+{
+    UNIMPLEMENTED_FUNC();
+    return -1;
 }
 
 int pthread_yield()
@@ -1478,6 +1673,12 @@ int sem_wait()
     return 0;
 }
 
+int sem_trywait()
+{
+    UNIMPLEMENTED_FUNC();
+    return 0;
+}
+
 DIR *opendir(const char *name)
 {
     UNIMPLEMENTED_FUNC();
@@ -1489,7 +1690,7 @@ DIR *opendir(const char *name)
 
 typedef struct
 {
-    int fd;
+    _IO_FILE baseFile;
     long long offset;
     int eof;
     int errorflag;
@@ -1529,7 +1730,8 @@ FILE *fopen(const char *path, const char *mode)
     if( fd >= 0 )
     {
         MYFILE* myfile = (MYFILE*)malloc(sizeof(MYFILE));
-        myfile->fd = fd;
+        memset(myfile, 0, sizeof(MYFILE));
+        myfile->baseFile._fileno = fd;
         myfile->offset = offset;
         myfile->eof = 0;
         myfile->errorflag = 0;
@@ -1548,6 +1750,21 @@ FILE *fopen64(const char *path, const char *mode)
     return fopen(path, mode);
 }
 
+FILE *fdopen(int fd, const char *mode)
+{
+    ENTER_FUNC();
+    MYFILE* myfile = (MYFILE*)malloc(sizeof(MYFILE));
+    memset(myfile, 0, sizeof(MYFILE));
+    myfile->baseFile._fileno = fd;
+    return (FILE*)myfile;
+}
+
+FILE *freopen(const char *path, const char *mode, FILE *stream)
+{
+    UNIMPLEMENTED_FUNC();
+    return NULL;
+}
+
 int fclose(FILE *f)
 {
     if (f == stdin )
@@ -1559,7 +1776,7 @@ int fclose(FILE *f)
     else
     {
         MYFILE* myfile = (MYFILE*)f;
-        int ret = close(myfile->fd);
+        int ret = close(myfile->baseFile._fileno);
         int myerrno = errno;
         free(myfile);
         errno = myerrno;
@@ -1583,7 +1800,7 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *f)
     else
     {
         MYFILE* myfile = (MYFILE*)f;
-        ssize_t read_bytes = read(myfile->fd, ptr, size * nmemb);
+        ssize_t read_bytes = read(myfile->baseFile._fileno, ptr, size * nmemb);
         int myerrno = errno;
         if( read_bytes == 0 )
             myfile->eof = 1;
@@ -1612,7 +1829,7 @@ size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *f)
     else
     {
         MYFILE* myfile = (MYFILE*)f;
-        ssize_t written = write(myfile->fd, ptr, size * nmemb);
+        ssize_t written = write(myfile->baseFile._fileno, ptr, size * nmemb);
         int myerrno = errno;
         myfile->offset += written;
         errno = myerrno;
@@ -1652,23 +1869,15 @@ int fseeko64(FILE *f, off64_t offset, int whence)
     else
     {
         MYFILE* myfile = (MYFILE*)f;
-        off_t ret = lseek(myfile->fd, (off_t)offset, whence);
+        off_t ret = lseek(myfile->baseFile._fileno, (off_t)offset, whence);
         myfile->eof = 0;
         myfile->offset = ret;
         return (ret != -1) ? 0 : -1;
     }
 }
 
-int fgetc(FILE *stream)
-{
-    UNIMPLEMENTED_FUNC();
-    abort();
-    return 0;
-}
-
 char *fgets(char *s, int size, FILE *stream)
 {
-
     int i;
     silent = 1;
     for(i=0;i<size-1;i++)
@@ -1691,6 +1900,13 @@ char *fgets(char *s, int size, FILE *stream)
     return s;
 }
 
+char *fgets_unlocked(char *s, int size, FILE *stream)
+{
+    ENTER_FUNC();
+    return fgets(s, size, stream);
+}
+
+
 ssize_t getline(char **lineptr, size_t *n, FILE *stream)
 {
     UNIMPLEMENTED_FUNC();
@@ -1703,7 +1919,7 @@ ssize_t getdelim(char **lineptr, size_t *n, int delim, FILE *stream)
     return -1;
 }
 
-int getc(FILE *stream)
+static int myfgetc(FILE *stream)
 {
     unsigned char c;
     if( fread(&c, 1, 1, stream) == 1 )
@@ -1712,9 +1928,24 @@ int getc(FILE *stream)
         return EOF;
 }
 
+int getc(FILE *stream)
+{
+    return myfgetc(stream);
+}
+
+int getc_unlocked(FILE *stream)
+{
+    return myfgetc(stream);
+}
+
+int fgetc(FILE *stream)
+{
+    return myfgetc(stream);
+}
+
 int getchar(void)
 {
-    return getc(stdin);
+    return myfgetc(stdin);
 }
 
 char *gets(char *s)
@@ -1726,9 +1957,35 @@ char *gets(char *s)
 
 int ungetc(int c, FILE *stream)
 {
-    UNIMPLEMENTED_FUNC();
-    abort();
+    long long pos = ftello64(stream);
+    if( pos == 0 )
+        return EOF;
+    fseek(stream, -1, SEEK_CUR);
+    if( c != getc(stream) )
+    {
+        DISPLAY("UNSUPPORTED", "ungetc does not return same char");
+        return EOF;
+    }
+    fseek(stream, -1, SEEK_CUR);
+    return c;
+}
+
+void flockfile(FILE *filehandle)
+{
+}
+
+int ftrylockfile(FILE *filehandle)
+{
     return 0;
+}
+
+void funlockfile(FILE *filehandle)
+{
+}
+
+int __uflow (FILE *stream)
+{
+    return myfgetc(stream);
 }
 
 wchar_t *fgetws(wchar_t *ws, int n, FILE *stream)
@@ -1792,8 +2049,7 @@ int putchar(int c)
 
 int fputs(const char *s, FILE *stream)
 {
-    char eol = '\n';
-    return fwrite(s, 1, strlen(s), stream) + fwrite(&eol, 1, 1, stream);
+    return fwrite(s, 1, strlen(s), stream);
 }
 
 int flock(int fd, int operation)
@@ -1839,7 +2095,7 @@ int fileno(FILE *f)
     else
     {
         MYFILE* myfile = (MYFILE*)f;
-        return myfile->fd;
+        return myfile->baseFile._fileno;
     }
 }
 
@@ -2180,4 +2436,36 @@ long int sysconf (int name)
     sprintf(buffer, "sysconf(%d)", name);
     UNIMPLEMENTED(buffer);
     return -1;
+}
+
+
+int ioctl (int __fd, unsigned long int __request, ...)
+{
+    UNIMPLEMENTED_FUNC();
+    return -1;
+}
+
+int sigaction(int signum, const struct sigaction *act,
+                struct sigaction *oldact)
+{
+    UNIMPLEMENTED_FUNC();
+    return 0;
+}
+
+int tcgetattr(void)
+{
+    UNIMPLEMENTED_FUNC();
+    return -1;
+}
+
+int tcsetattr(void)
+{
+    UNIMPLEMENTED_FUNC();
+    return -1;
+}
+
+int isatty(int fd)
+{
+    UNIMPLEMENTED_FUNC();
+    return 0;
 }
