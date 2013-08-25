@@ -2,6 +2,10 @@ default: all
 
 all: seccomp_launcher libseccomp_preload.so
 
+install: all
+	install seccomp_launcher /usr/local/bin/seccomp_launcher
+	install libseccomp_preload.so /usr/local/bin/libseccomp_preload.so
+
 clean:
 	-rm seccomp_launcher
 	-rm libseccomp_preload.so
