@@ -64,6 +64,20 @@ typedef struct _CPLSpawnedProcess CPLSpawnedProcess;
 #define CPLStrdup strdup
 extern char** environ;
 
+static int child_fd[1024];
+
+#define N_CHILD_DIR 32
+static DIR* child_dir[N_CHILD_DIR] = { NULL };
+
+typedef struct _ListFile ListFile;
+struct _ListFile
+{
+    char* pszFilename;
+    struct _ListFile* psNext;
+};
+
+ListFile* psHeadTmp = NULL;
+
 /************************************************************************/
 /*                              CSLCount()                              */
 /************************************************************************/
@@ -469,15 +483,6 @@ char* make_full_filename(const char* pszCurDir, const char* pszFilename)
     return ret;
 }
 
-typedef struct _ListFile ListFile;
-struct _ListFile
-{
-    char* pszFilename;
-    struct _ListFile* psNext;
-};
-
-ListFile* psHead = NULL;
-
 enum
 {
     OP_READ,
@@ -490,37 +495,57 @@ enum
 static int file_allowed(const char* pszFilename, int argc, char* argv[], int op)
 {
     int i;
+
+    /* Special case for temporary files in /tmp. Every software run under */
+    /* seccomp_launcher can write files in /tmp, but can only read the files */
+    /* it has written. */
     if( strncmp(pszFilename, "/tmp/", 5) == 0 &&
         strstr(pszFilename, "..") == NULL )
     {
         if( op == OP_WRITE )
         {
-            ListFile* psNew = (ListFile*)calloc(sizeof(ListFile), 1);
-            if( psHead == NULL )
-                psHead = psNew;
-            else
+            ListFile* psIter = psHeadTmp;
+            while(psIter != NULL)
             {
-                psNew->psNext = psHead;
-                psHead = psNew;
+                if( strcmp(psIter->pszFilename, pszFilename) == 0 )
+                {
+                    break;
+                }
+                psIter = psIter->psNext;
             }
-            psHead->pszFilename = strdup(pszFilename);
+            if( psIter == NULL )
+            {
+                /* Add the file to the list */
+                ListFile* psNew = (ListFile*)calloc(sizeof(ListFile), 1);
+                if( psHeadTmp == NULL )
+                    psHeadTmp = psNew;
+                else
+                {
+                    psNew->psNext = psHeadTmp;
+                    psHeadTmp = psNew;
+                }
+                psHeadTmp->pszFilename = strdup(pszFilename);
+            }
             return 1;
         }
         else
         {
             ListFile* psPrev = NULL;
-            ListFile* psIter = psHead;
+            ListFile* psIter = psHeadTmp;
+            /* Check that the file is in the list */
             while(psIter != NULL)
             {
                 if( strcmp(psIter->pszFilename, pszFilename) == 0 )
                 {
+                    /* In the case of a unlink operation, remove the file */
+                    /* from the list */
                     if( op == OP_UNLINK )
                     {
                         free(psIter->pszFilename);
                         if( psPrev != NULL )
                             psPrev->psNext = psIter->psNext;
                         else
-                            psHead = psIter->psNext;
+                            psHeadTmp = psIter->psNext;
                         free(psIter);
                     }
                     return 1;
@@ -534,30 +559,38 @@ static int file_allowed(const char* pszFilename, int argc, char* argv[], int op)
 
     if( op == OP_READ )
     {
+        /* White list of various location where is is safe to read */
         if( strcmp(pszFilename, "/dev/urandom") == 0 )
             return 1;
         if( strcmp(pszFilename, "/etc/inputrc") == 0 )
             return 1;
         if( strcmp(pszFilename, "/lib/terminfo/x/xterm") == 0 )
             return 1;
-        if( strstr(pszFilename, "/lib/python") != NULL)
+        if( strstr(pszFilename, "/lib/python") != NULL &&
+            strstr(pszFilename, "..") == NULL)
             return 1;
-        if( strstr(pszFilename, "/include/python") != NULL)
+        if( strstr(pszFilename, "/include/python") != NULL &&
+            strstr(pszFilename, "..") == NULL)
             return 1;
-        if( strncmp(pszFilename, "/usr/share/gdal", strlen("/usr/share/gdal")) == 0 )
+        if( strncmp(pszFilename, "/usr/share/gdal", strlen("/usr/share/gdal")) == 0 &&
+            strstr(pszFilename, "..") == NULL)
             return 1;
         char* gdal_data = getenv("GDAL_DATA");
         if( gdal_data != NULL &&
-            strncmp(pszFilename, gdal_data, strlen(gdal_data)) == 0 )
+            strncmp(pszFilename, gdal_data, strlen(gdal_data)) == 0 &&
+            strstr(pszFilename, "..") == NULL)
             return 1;
     }
+
+    /* Expand relative filenames to full filename */
     char* pszCurDir = getcwd(NULL, 0);
     char* pszFullFilename = make_full_filename(pszCurDir, pszFilename);
     if( pszFullFilename == NULL )
     {
         pszFullFilename = strdup(pszFilename);
     }
-    
+
+    /* If the file is a directory, allow to open it */
     struct stat buf;
     if( op == OP_READ && stat(pszFullFilename, &buf) == 0 && S_ISDIR(buf.st_mode) )
     {
@@ -596,6 +629,9 @@ static int file_allowed(const char* pszFilename, int argc, char* argv[], int op)
                 break;
             }
         }
+
+        /* If an argument on the command line is a directory, allow operations */
+        /* in file in that directory */
         struct stat buf;
         if( stat(pszFullArg, &buf) == 0 && S_ISDIR(buf.st_mode) )
         {
@@ -612,6 +648,7 @@ static int file_allowed(const char* pszFilename, int argc, char* argv[], int op)
     return ret;
 }
 
+/* Access modes */
 enum
 {
     MODE_RO,
@@ -619,11 +656,6 @@ enum
     MODE_RW,
     MODE_RW_EXTENDED
 };
-
-static int child_fd[1024];
-
-#define N_CHILD_DIR 32
-static DIR* child_dir[N_CHILD_DIR] = { NULL };
 
 int main(int argc, char* argv[])
 {

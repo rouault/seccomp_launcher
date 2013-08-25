@@ -32,7 +32,9 @@
 
 enum
 {
-    CMD_HAS_SWITCHED_TO_SECCOMP,
+    CMD_HAS_SWITCHED_TO_SECCOMP, /* not a syscall, but an hint from seccomp_preload */
+                                 /* to seccomp_launcher that it has switched */
+                                 /* into SECCOMP protection */
     CMD_OPEN,
     CMD_CLOSE,
     CMD_READ,
@@ -52,7 +54,10 @@ enum
     CMD_READDIR64,
     CMD_REWINDDIR,
     CMD_CLOSEDIR,
-    CMD_SELECT_STDIN
+    CMD_SELECT_STDIN /* not a regular system call, */
+                     /* but select(1, &read_fds, NULL, NULL, NULL) where */
+                     /* read_fds is set to fd 0. This is used by the Python */
+                     /* interactive console */
 };
 
 #endif /*  GUARD_SECCOMP_WRAPPER_H */
