@@ -31,7 +31,7 @@
 #define _LARGEFILE64_SOURCE 1
 #define _GNU_SOURCE 1 /* RTLD_NEXT */
 
-/* #define VERBOSE 1 */
+/*#define VERBOSE 1 */
 
 #include <sys/mman.h>
 #include <sys/prctl.h>
@@ -61,6 +61,7 @@
 #include <wchar.h>
 #include <signal.h>
 #include <setjmp.h>
+#include <pthread.h>
 
 #include "seccomp_launcher.h"
 
@@ -333,6 +334,11 @@ static Library libs[] =
     { "osgeo/_ogr.so", NULL },
     { "osgeo/_osr.so", NULL },
     { "lib-dynload/readline.so", NULL},
+    { "osgeo/_gdal.cpython-32m.so", NULL },
+    { "osgeo/_gdalconst.cpython-32m.so", NULL },
+    { "osgeo/_ogr.cpython-32m.so", NULL },
+    { "osgeo/_osr.cpython-32m.so", NULL },
+    { "lib-dynload/readline.cpython-32m.so", NULL},
 };
 
 #define N_LIBS (sizeof(libs) / sizeof(libs[0]))
@@ -357,6 +363,11 @@ static Symbol syms[] =
     { "osgeo/_osr.so", "PyInit__osr", NULL, NULL },
     { "lib-dynload/readline.so", "initreadline", NULL, NULL },
     { "lib-dynload/readline.so", "PyInit_readline", NULL, NULL },
+    { "osgeo/_gdal.cpython-32m.so", "PyInit__gdal", NULL, NULL },
+    { "osgeo/_gdalconst.cpython-32m.so", "PyInit__gdalconst", NULL, NULL },
+    { "osgeo/_ogr.cpython-32m.so", "PyInit__ogr", NULL, NULL },
+    { "osgeo/_osr.cpython-32m.so", "PyInit__osr", NULL, NULL },
+    { "lib-dynload/readline.cpython-32m.so", "PyInit_readline", NULL, NULL },
     { "libproj.so", "pj_init", NULL, NULL },
     { "libproj.so", "pj_init_plus", NULL, NULL },
     { "libproj.so", "pj_free", NULL, NULL },
@@ -426,6 +437,7 @@ static void resolveSyms(void)
                 strcpy(szPath, pythonpath);
                 strcat(szPath, "/site-packages/");
                 strcat(szPath, libs[i].pszLibName);
+                /* DISPLAY("trying", szPath); */
                 libs[i].pLibHandle = dlopen(szPath, RTLD_NOW);
             }
             if( libs[i].pLibHandle == NULL &&
@@ -442,7 +454,7 @@ static void resolveSyms(void)
                         libs[i].pszLibName, dlerror());
             }*/
         }
-        else if( strcmp(libs[i].pszLibName, "lib-dynload/readline.so") == 0 )
+        else if( strstr(libs[i].pszLibName, "lib-dynload/readline") != NULL )
         {
             char szPath[1024];
             if( pythonpath != NULL && strlen(pythonpath) < 512 )
@@ -504,7 +516,7 @@ static void* mydlopen (const char *file, int mode, void *dl_caller)
             if( strcmp(file, libs[i].pszLibName) == 0 ||
                 (strncmp(libs[i].pszLibName, "osgeo/", 6) == 0 &&
                  strstr(file, libs[i].pszLibName) != NULL) ||
-                (strcmp(libs[i].pszLibName, "lib-dynload/readline.so") == 0 &&
+                (strstr(libs[i].pszLibName, "lib-dynload/readline") !=NULL &&
                  strstr(file, libs[i].pszLibName) != NULL) )
             {
                 return libs[i].pLibHandle;
@@ -1554,13 +1566,17 @@ int closedir(DIR *dirp)
 
 
 
-int pthread_key_create(void* ignored1, void* ignored2)
+int pthread_key_create(pthread_key_t *key,
+                        void (*__destr_function) (void *))
 {
     DUMMY_FUNC();
+    static int countKeys = 0;
+    *key = countKeys;
+    countKeys ++;
     return 0;
 }
 
-int pthread_key_delete()
+int pthread_key_delete(pthread_key_t __key)
 {
     DUMMY_FUNC();
     return 0;
@@ -1568,13 +1584,13 @@ int pthread_key_delete()
 
 typedef struct
 {
-    unsigned int key;
+    pthread_key_t key;
     void* value;
 } specific;
 specific tab_specs[16];
 static int nspecs = 0;
 
-void* pthread_getspecific(unsigned int key)
+void* pthread_getspecific(pthread_key_t key)
 {
     /* ENTER_FUNC(); */
     int i;
@@ -1587,7 +1603,7 @@ void* pthread_getspecific(unsigned int key)
     return NULL;
 }
 
-int pthread_setspecific(unsigned int key, void* p)
+int pthread_setspecific(pthread_key_t key, __const void *p)
 {
     /* ENTER_FUNC(); */
     int i;
@@ -1596,35 +1612,36 @@ int pthread_setspecific(unsigned int key, void* p)
         if( key == tab_specs[i].key )
         {
             /* fprintf(stderr, "pthread_setspecific %d = %p\n", key, p); */
-            tab_specs[i].value = p;
+            tab_specs[i].value = (void*)p;
             return 0;
         }
     }
     if( nspecs == 16 )
         return -1;
     tab_specs[nspecs].key = key;
-    tab_specs[nspecs].value = p;
+    tab_specs[nspecs].value = (void*)p;
     nspecs ++;
     return 0;
 }
 
-void** tab_keys[16] = { NULL };
+pthread_once_t* tab_onces[16] = { NULL };
 static int nkeys = 0;
 
-int pthread_once(void* key, void (*pfn)(void))
+int pthread_once(pthread_once_t *once_control,
+             void (*__init_routine) (void))
 {
     /* ENTER_FUNC(); */
     int i;
     for(i = 0; i < nkeys; i ++)
     {
-        if( key == tab_keys[i] )
+        if( once_control == tab_onces[i] )
             return 0;
     }
     if( nkeys == 16 )
         return -1;
-    tab_keys[nkeys ++] = key;
+    tab_onces[nkeys ++] = once_control;
 
-    pfn();
+    __init_routine();
     return 0;
 }
 
@@ -1634,44 +1651,44 @@ int pthread_getattr_np(pthread_t thread, pthread_attr_t *attr)
     return -1;
 }
 
-int pthread_mutexattr_init()
+int pthread_mutexattr_init(pthread_mutexattr_t *__attr)
 {
     /* FIXME! : we need UNIMPLEMENTED_FUNC() to make that work ! weird !! */
     UNIMPLEMENTED_FUNC();
     return 0;
 }
 
-int pthread_mutexattr_settype()
+int pthread_mutexattr_settype(pthread_mutexattr_t *__attr, int __kind)
 {
     /* DUMMY_FUNC(); */
     return 0;
 }
 
-int pthread_setcanceltype()
+int pthread_setcanceltype(int __type, int *__oldtype)
 {
     /*UNIMPLEMENTED_FUNC(); */
     return 0;
 }
 
-int pthread_attr_init()
+int pthread_attr_init(pthread_attr_t *__attr)
 {
     /* DUMMY_FUNC(); */
     return 0;
 }
 
-int pthread_attr_destroy()
+int pthread_attr_destroy(pthread_attr_t *__attr)
 {
     /* DUMMY_FUNC(); */
     return 0;
 }
 
-int pthread_attr_setdetachstate()
+int pthread_attr_setdetachstate(pthread_attr_t *__attr, int __detachstate)
 {
     /* DUMMY_FUNC(); */
     return 0;
 }
 
-int pthread_attr_setschedpolicy()
+int pthread_attr_setschedpolicy(pthread_attr_t *__attr, int __policy)
 {
     /* DUMMY_FUNC(); */
     return 0;
@@ -1684,111 +1701,123 @@ int pthread_attr_setstack(pthread_attr_t *attr,
     return -1;
 }
 
-int pthread_attr_getstack(pthread_attr_t *attr,
-                                 void **stackaddr, size_t *stacksize)
+int pthread_attr_getstack(const pthread_attr_t *__restrict __attr,
+                  void **__restrict __stackaddr,
+                  size_t *__restrict __stacksize)
 {
     UNIMPLEMENTED_FUNC();
     return -1;
 }
 
-int pthread_attr_setstacksize()
+int pthread_attr_setstacksize(pthread_attr_t *__attr,
+                      size_t __stacksize)
 {
     UNIMPLEMENTED_FUNC();
     return -1;
 }
 
-int pthread_attr_setscope()
+int pthread_attr_setscope(pthread_attr_t *__attr, int __scope)
 {
     UNIMPLEMENTED_FUNC();
     return -1;
 }
 
-int pthread_mutex_init()
+int pthread_mutex_init(pthread_mutex_t *__mutex,
+                   __const pthread_mutexattr_t *__mutexattr)
 {
     /* DUMMY_FUNC(); */
     return 0;
 }
 
-int pthread_mutex_trylock()
+int pthread_mutex_trylock(pthread_mutex_t *__mutex)
 {
     /* DUMMY_FUNC(); */
     return 0;
 }
 
-int pthread_mutex_lock()
+int pthread_mutex_lock(pthread_mutex_t *__mutex)
 {
     /* DUMMY_FUNC(); */
     return 0;
 }
 
-int pthread_mutex_timedlock()
+int pthread_mutex_timedlock(pthread_mutex_t *__restrict __mutex,
+                                    __const struct timespec *__restrict
+                                    __abstime)
 {
     /* DUMMY_FUNC(); */
     return 0;
 }
 
-int pthread_mutex_unlock()
+int pthread_mutex_unlock(pthread_mutex_t *__mutex)
 {
     /* DUMMY_FUNC(); */
     return 0;
 }
 
-int pthread_mutex_destroy()
+int pthread_mutex_destroy(pthread_mutex_t *__mutex)
 {
     /* DUMMY_FUNC(); */
     return 0;
 }
 
-int pthread_cond_init()
+int pthread_cond_init(pthread_cond_t *__restrict __cond,
+                  __const pthread_condattr_t *__restrict
+                  __cond_attr)
 {
     /* DUMMY_FUNC(); */
     return 0;
 }
 
-int pthread_cond_signal()
+int pthread_cond_signal(pthread_cond_t *__cond)
 {
     /* DUMMY_FUNC(); */
     return 0;
 }
 
-int pthread_cond_broadcast()
+int pthread_cond_broadcast(pthread_cond_t *__cond)
 {
     /* DUMMY_FUNC(); */
     return 0;
 }
 
-int pthread_cond_wait()
+int pthread_cond_wait(pthread_cond_t *__restrict __cond,
+                  pthread_mutex_t *__restrict __mutex)
 {
     /* DUMMY_FUNC(); */
     return 0;
 }
 
-int pthread_cond_timedwait()
+int pthread_cond_timedwait(pthread_cond_t *__restrict __cond,
+                   pthread_mutex_t *__restrict __mutex,
+                   __const struct timespec *__restrict __abstime)
 {
     /* DUMMY_FUNC(); */
     return 0;
 }
 
-int pthread_cond_destroy()
+int pthread_cond_destroy(pthread_cond_t *__cond)
 {
     /* DUMMY_FUNC(); */
     return 0;
 }
 
 
-int pthread_getschedparam()
+int pthread_getschedparam(pthread_t __target_thread,
+                  int *__restrict __policy,
+                  struct sched_param *__restrict __param)
 {
     /* DUMMY_FUNC(); */
     return 0;
 }
 
-int pthread_join()
+int pthread_join(pthread_t __th, void **__thread_return)
 {
     UNIMPLEMENTED_FUNC();
     return 0;
 }
 
-int pthread_detach()
+int pthread_detach(pthread_t __th)
 {
     UNIMPLEMENTED_FUNC();
     return 0;
@@ -1840,25 +1869,28 @@ int usleep(useconds_t usec)
     return 0;
 }
 
-int pthread_create()
+int pthread_create(pthread_t *__restrict __newthread,
+               __const pthread_attr_t *__restrict __attr,
+               void *(*__start_routine) (void *),
+               void *__restrict __arg)
 {
     UNIMPLEMENTED_FUNC();
     return -1;
 }
 
-int pthread_cancel()
+int pthread_cancel(pthread_t __th)
 {
     UNIMPLEMENTED_FUNC();
     return 0;
 }
 
-int pthread_exit()
+void pthread_exit(void *__retval)
 {
     UNIMPLEMENTED_FUNC();
-    return 0;
+    abort();
 }
 
-int pthread_self()
+pthread_t pthread_self(void)
 {
     return 1;
 }
@@ -1892,10 +1924,17 @@ int sem_wait()
     return 0;
 }
 
-int sem_trywait()
+int sem_timedwait()
 {
     UNIMPLEMENTED_FUNC();
     return 0;
+}
+
+int sem_trywait()
+{
+    UNIMPLEMENTED_FUNC();
+    errno = EAGAIN;
+    return -1;
 }
 
 #define BUFFERSIZE  4096
