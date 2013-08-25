@@ -416,6 +416,10 @@ static void resolveSyms(void)
         {
             strcpy(szPythonPath, szReadlinkSelf);
             memcpy(szPythonPath + (pszBinPython - szReadlinkSelf + 1), "lib", 3);
+            if( szPythonPath[strlen(szPythonPath)-1] == 'u' )
+                szPythonPath[strlen(szPythonPath)-1] = '\0';
+            if( szPythonPath[strlen(szPythonPath)-1] == 'm' )
+                szPythonPath[strlen(szPythonPath)-1] = '\0';
             pythonpath = szPythonPath;
             if( strncmp(szReadlinkSelf, "/usr/bin/python", strlen("/usr/bin/python")) == 0 )
             {
