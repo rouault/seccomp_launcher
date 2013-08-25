@@ -334,11 +334,19 @@ static Library libs[] =
     { "osgeo/_ogr.so", NULL },
     { "osgeo/_osr.so", NULL },
     { "lib-dynload/readline.so", NULL},
+
     { "osgeo/_gdal.cpython-32m.so", NULL },
     { "osgeo/_gdalconst.cpython-32m.so", NULL },
     { "osgeo/_ogr.cpython-32m.so", NULL },
     { "osgeo/_osr.cpython-32m.so", NULL },
     { "lib-dynload/readline.cpython-32m.so", NULL},
+
+    { "osgeo/_gdal.cpython-32mu.so", NULL },
+    { "osgeo/_gdalconst.cpython-32mu.so", NULL },
+    { "osgeo/_ogr.cpython-32mu.so", NULL },
+    { "osgeo/_osr.cpython-32mu.so", NULL },
+    { "lib-dynload/readline.cpython-32mu.so", NULL},
+
 };
 
 #define N_LIBS (sizeof(libs) / sizeof(libs[0]))
@@ -363,11 +371,19 @@ static Symbol syms[] =
     { "osgeo/_osr.so", "PyInit__osr", NULL, NULL },
     { "lib-dynload/readline.so", "initreadline", NULL, NULL },
     { "lib-dynload/readline.so", "PyInit_readline", NULL, NULL },
+
     { "osgeo/_gdal.cpython-32m.so", "PyInit__gdal", NULL, NULL },
     { "osgeo/_gdalconst.cpython-32m.so", "PyInit__gdalconst", NULL, NULL },
     { "osgeo/_ogr.cpython-32m.so", "PyInit__ogr", NULL, NULL },
     { "osgeo/_osr.cpython-32m.so", "PyInit__osr", NULL, NULL },
     { "lib-dynload/readline.cpython-32m.so", "PyInit_readline", NULL, NULL },
+
+    { "osgeo/_gdal.cpython-32mu.so", "PyInit__gdal", NULL, NULL },
+    { "osgeo/_gdalconst.cpython-32mu.so", "PyInit__gdalconst", NULL, NULL },
+    { "osgeo/_ogr.cpython-32mu.so", "PyInit__ogr", NULL, NULL },
+    { "osgeo/_osr.cpython-32mu.so", "PyInit__osr", NULL, NULL },
+    { "lib-dynload/readline.cpython-32mu.so", "PyInit_readline", NULL, NULL },
+
     { "libproj.so", "pj_init", NULL, NULL },
     { "libproj.so", "pj_init_plus", NULL, NULL },
     { "libproj.so", "pj_free", NULL, NULL },
