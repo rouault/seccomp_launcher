@@ -110,6 +110,11 @@ The seccomp_launcher software is made of two parts :
      - other GNU libc functions related to threading, etc... have just a stub
        implementation that does nothing.
 
+Author
+------
+
+Even Rouault, <even dot rouault at mines-paris dot org>
+
 License
 -------
 
@@ -126,8 +131,8 @@ techniques used. seccomp_launcher uses absolutely no assembler code, and thus
 can potentially be used on any hardware platform supported by Linux (e.g.
 ARM, although at the time of writing only x86_64 has been tested).
 
-How to contribute ?
--------------------
+What to contribute ?
+--------------------
 
 Reviews of seccomp_launcher.c for potential holes in the security checks are
 welcome !
