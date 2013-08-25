@@ -43,6 +43,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <assert.h>
+#include <dirent.h>
 
 #define TRUE 1
 #define FALSE 0
@@ -433,26 +434,212 @@ int CPLSpawnAsyncFinish(CPLSpawnedProcess* p, int bWait, int bKill)
     return status;
 }
 
-static int child_fd[1024];
-
 static void Usage(char* argv[])
 {
-    printf("Usage: %s [-rw] a_binary option1...\n", argv[0]);
+    printf("Usage: %s [-ro | -rw | -ro_extended | -rw_extended] a_binary option1...\n", argv[0]);
     printf("\n");
     printf("Options:\n");
-    printf(" -rw : turn sandbox in read/write mode.\n");
+    printf(" -ro (default): set sandbox in read-only mode, restricted to files explicitely listed or white listed.\n");
+    printf(" -ro_extended : set sandbox in read-only mode (access to all files readable by the current user).\n");
+    printf(" -rw : set sandbox in read/write mode, restricted to files explicitely listed or white listed..\n");
+    printf(" -rw_extended : set sandbox in full read/write mode (access to all files readable by the current user).\n");
     printf("\n");
     exit(1);
 }
 
+char* make_full_filename(const char* pszCurDir, const char* pszFilename)
+{
+    char* ret;
+    if( pszFilename[0] != '/' )
+    {
+        char* tmp = (char*) malloc(strlen(pszCurDir) + 1 + strlen(pszFilename) + 1);
+        strcpy(tmp, pszCurDir);
+        strcat(tmp, "/");
+        strcat(tmp, pszFilename);
+        ret = realpath(tmp, NULL);
+        if( ret == NULL && strstr(pszFilename, "..") == NULL &&
+            strstr(pszFilename, "./") == NULL )
+        {
+            return tmp;
+        }
+        free(tmp);
+    }
+    else
+        ret = realpath(pszFilename, NULL);
+    return ret;
+}
+
+typedef struct _ListFile ListFile;
+struct _ListFile
+{
+    char* pszFilename;
+    struct _ListFile* psNext;
+};
+
+ListFile* psHead = NULL;
+
+enum
+{
+    OP_READ,
+    OP_WRITE,
+    OP_UNLINK
+};
+
+/* Only authorized reading files mentionned on the command line, or in */
+/* white-list */
+static int file_allowed(const char* pszFilename, int argc, char* argv[], int op)
+{
+    int i;
+    if( strncmp(pszFilename, "/tmp/", 5) == 0 &&
+        strstr(pszFilename, "..") == NULL )
+    {
+        if( op == OP_WRITE )
+        {
+            ListFile* psNew = (ListFile*)calloc(sizeof(ListFile), 1);
+            if( psHead == NULL )
+                psHead = psNew;
+            else
+            {
+                psNew->psNext = psHead;
+                psHead = psNew;
+            }
+            psHead->pszFilename = strdup(pszFilename);
+            return 1;
+        }
+        else
+        {
+            ListFile* psPrev = NULL;
+            ListFile* psIter = psHead;
+            while(psIter != NULL)
+            {
+                if( strcmp(psIter->pszFilename, pszFilename) == 0 )
+                {
+                    if( op == OP_UNLINK )
+                    {
+                        free(psIter->pszFilename);
+                        if( psPrev != NULL )
+                            psPrev->psNext = psIter->psNext;
+                        else
+                            psHead = psIter->psNext;
+                        free(psIter);
+                    }
+                    return 1;
+                }
+                psPrev = psIter;
+                psIter = psIter->psNext;
+            }
+            return 0;
+        }
+    }
+
+    if( op == OP_READ )
+    {
+        if( strcmp(pszFilename, "/dev/urandom") == 0 )
+            return 1;
+        if( strcmp(pszFilename, "/etc/inputrc") == 0 )
+            return 1;
+        if( strcmp(pszFilename, "/lib/terminfo/x/xterm") == 0 )
+            return 1;
+        if( strstr(pszFilename, "/lib/python") != NULL)
+            return 1;
+        if( strstr(pszFilename, "/include/python") != NULL)
+            return 1;
+        if( strncmp(pszFilename, "/usr/share/gdal", strlen("/usr/share/gdal")) == 0 )
+            return 1;
+        char* gdal_data = getenv("GDAL_DATA");
+        if( gdal_data != NULL &&
+            strncmp(pszFilename, gdal_data, strlen(gdal_data)) == 0 )
+            return 1;
+    }
+    char* pszCurDir = getcwd(NULL, 0);
+    char* pszFullFilename = make_full_filename(pszCurDir, pszFilename);
+    if( pszFullFilename == NULL )
+    {
+        pszFullFilename = strdup(pszFilename);
+    }
+    
+    struct stat buf;
+    if( op == OP_READ && stat(pszFullFilename, &buf) == 0 && S_ISDIR(buf.st_mode) )
+    {
+        free(pszFullFilename);
+        free(pszCurDir);
+        return 1;
+    }
+
+    const char* pszDot1 = strrchr(pszFullFilename, '.');
+    char* pszFullArg = NULL;
+    int ret = 0;
+    for(i=1;i<argc;i++)
+    {
+        if( argv[i][0] == '-' )
+            continue;
+        free(pszFullArg);
+        pszFullArg = make_full_filename(pszCurDir, argv[i]);
+        if( pszFullArg == NULL )
+        {
+            pszFullArg = strdup(argv[i]);
+        }
+
+        /*printf("%s %s\n", pszFullFilename, pszFullArg);*/
+        if( strcmp(pszFullFilename, pszFullArg) == 0 )
+        {
+            ret = 1;
+            break;
+        }
+        if( pszDot1 != NULL )
+        {
+            /* Accept also files that share the same radix */
+            if( strncmp(pszFullFilename, pszFullArg, pszDot1 - pszFullFilename) == 0 &&
+                strchr(pszFullArg + (pszDot1 - pszFullFilename + 1), '/') == NULL )
+            {
+                ret = 1;
+                break;
+            }
+        }
+        struct stat buf;
+        if( stat(pszFullArg, &buf) == 0 && S_ISDIR(buf.st_mode) )
+        {
+            if( strncmp(pszFullFilename, pszFullArg, strlen(pszFullArg)) == 0 )
+            {
+                ret = 1;
+                break;
+            }
+        }
+    }
+    free(pszFullArg);
+    free(pszFullFilename);
+    free(pszCurDir);
+    return ret;
+}
+
+enum
+{
+    MODE_RO,
+    MODE_RO_EXTENDED,
+    MODE_RW,
+    MODE_RW_EXTENDED
+};
+
+static int child_fd[1024];
+
+#define N_CHILD_DIR 32
+static DIR* child_dir[N_CHILD_DIR] = { NULL };
+
 int main(int argc, char* argv[])
 {
     int i;
-    int bReadOnly = TRUE;
+    int eMode = MODE_RO;
+    int bInSecComp = FALSE;
     for(i=1;i<argc;i++)
     {
-        if( strcmp(argv[i], "-rw") == 0 )
-            bReadOnly = FALSE;
+        if( strcmp(argv[i], "-ro") == 0 )
+            eMode = MODE_RO;
+        else if( strcmp(argv[i], "-ro_extended") == 0 )
+            eMode = MODE_RO_EXTENDED;
+        else if( strcmp(argv[i], "-rw") == 0 )
+            eMode = MODE_RW;
+        else if( strcmp(argv[i], "-rw_extended") == 0 )
+            eMode = MODE_RW_EXTENDED;
         else if( argv[i][0] == '-' )
         {
             Usage(argv);
@@ -483,7 +670,11 @@ int main(int argc, char* argv[])
         int cmd = 0;
         if( read(sp->fin, &cmd, 4) == 0 )
             break;
-        if( cmd == CMD_OPEN )
+        if( cmd == CMD_HAS_SWITCHED_TO_SECCOMP )
+        {
+            bInSecComp = TRUE;
+        }
+        else if( cmd == CMD_OPEN )
         {
             unsigned short len;
             read(sp->fin, &len, sizeof(len));
@@ -496,9 +687,16 @@ int main(int argc, char* argv[])
             read(sp->fin, &mode, 4);
             int fd;
             int myerrno = 0;
-            if( bReadOnly && flags != O_RDONLY )
+            if( bInSecComp && (eMode == MODE_RO || eMode == MODE_RW) &&
+                !file_allowed(path, argc, argv, (flags == O_RDONLY) ? OP_READ : OP_WRITE) )
             {
-                fprintf(stderr, "AccCtrl: open(%s,%d,0%o) rejected\n", path, flags, mode);
+                fprintf(stderr, "AccCtrl: open(%s,%d,0%o) rejected. Not in white list\n", path, flags, mode);
+                fd = -1;
+                myerrno = EACCES;
+            }
+            else if( !(eMode == MODE_RW || eMode == MODE_RW_EXTENDED) && flags != O_RDONLY )
+            {
+                fprintf(stderr, "AccCtrl: open(%s,%d,0%o) rejected. Nead write permissions.\n", path, flags, mode);
                 fd = -1;
                 myerrno = EACCES;
             }
@@ -506,15 +704,17 @@ int main(int argc, char* argv[])
             {
                 fd = open64(path, flags, mode);
                 myerrno = errno;
-                /*fprintf(stderr, "server: open(%s,%d,0%o) = %d\n", path, flags, mode, fd);*/
                 if( fd >= 1024 )
                 {
+                    fprintf(stderr, "AccCtrl: too many files opened\n");
                     close(fd);
                     fd = -1;
                     myerrno = ENFILE;
                 }
                 else if( fd >= 0 )
                     child_fd[fd] = 1;
+                /*else
+                    fprintf(stderr, "server: open(%s,%d,0%o) failed: %d\n", path, flags, mode, fd);*/
             }
             write(sp->fout, &fd, 4);
             if( fd < 0 )
@@ -629,7 +829,19 @@ int main(int argc, char* argv[])
             read(sp->fin, &mode, 4);
             int ret;
             int myerrno;
-            if( bReadOnly )
+            if( !bInSecComp )
+            {
+                fprintf(stderr, "AccCtrl: mkdir(%s,0%o) rejected\n", path, mode);
+                myerrno = EACCES;
+                ret = -1;
+            }
+            else if( eMode != MODE_RW && eMode != MODE_RW_EXTENDED )
+            {
+                fprintf(stderr, "AccCtrl: mkdir(%s,0%o) rejected\n", path, mode);
+                myerrno = EACCES;
+                ret = -1;
+            }
+            else if( eMode == MODE_RW && !file_allowed(path, argc, argv, OP_WRITE) )
             {
                 fprintf(stderr, "AccCtrl: mkdir(%s,0%o) rejected\n", path, mode);
                 myerrno = EACCES;
@@ -640,6 +852,52 @@ int main(int argc, char* argv[])
                 ret = mkdir(path, mode);
                 myerrno = errno;
                 /*fprintf(stderr, "server: mkdir(%s,0%o) = %d\n", path, mode, ret);*/
+            }
+            free(path);
+            write(sp->fout, &ret, 4);
+            if( ret < 0 )
+                write(sp->fout, &myerrno, 4);
+        }
+        else if (cmd == CMD_UNLINK || cmd == CMD_REMOVE || cmd == CMD_RMDIR)
+        {
+            unsigned short len;
+            read(sp->fin, &len, sizeof(len));
+            char* path = (char*)malloc(len+1);
+            read(sp->fin, path, len);
+            path[len] = '\0';
+            int ret;
+            int myerrno;
+            const char* pszOp = ( cmd == CMD_UNLINK ) ? "unlink" :
+                                ( cmd == CMD_REMOVE ) ? "remove" : "rmdir";
+            if( !bInSecComp )
+            {
+                fprintf(stderr, "AccCtrl: %s(%s) rejected\n", pszOp, path);
+                myerrno = EACCES;
+                ret = -1;
+            }
+            else if( eMode != MODE_RW && eMode != MODE_RW_EXTENDED )
+            {
+                fprintf(stderr, "AccCtrl: %s(%s) rejected\n", pszOp, path);
+                myerrno = EACCES;
+                ret = -1;
+            }
+            else if( eMode == MODE_RW && !file_allowed(path, argc, argv, OP_UNLINK) )
+            {
+                fprintf(stderr, "AccCtrl: %s(%s) rejected\n", pszOp, path);
+                myerrno = EACCES;
+                ret = -1;
+            }
+            else
+            {
+                if( cmd == CMD_UNLINK )
+                    ret = unlink(path);
+                else if( cmd == CMD_REMOVE )
+                    ret = remove(path);
+                else
+                    ret = rmdir(path);
+                /*if( ret < 0 )
+                    fprintf(stderr, "%s(%s) failed\n", pszOp, path);*/
+                myerrno = errno;
             }
             free(path);
             write(sp->fout, &ret, 4);
@@ -700,6 +958,137 @@ int main(int argc, char* argv[])
             write(sp->fout, &ret, 4);
             if( ret < 0 )
                 write(sp->fout, &myerrno, 4);
+        }
+        else if( cmd == CMD_OPENDIR )
+        {
+            unsigned short len;
+            read(sp->fin, &len, sizeof(len));
+            char* path = (char*)malloc(len + 1);
+            read(sp->fin, path, len);
+            path[len] = 0;
+            if( bInSecComp && (eMode == MODE_RO || eMode == MODE_RW) &&
+                !file_allowed(path, argc, argv, OP_READ) )
+            {
+                fprintf(stderr, "AccCtrl: opendir(%s) rejected. Not in white list\n", path);
+                int ret = -1;
+                write(sp->fout, &ret, 4);
+            }
+            else
+            {
+                DIR* dir = opendir(path);
+                if( dir == NULL )
+                {
+                    int ret = -1;
+                    write(sp->fout, &ret, 4);
+                }
+                else
+                {
+                    int i;
+                    for(i=0;i<N_CHILD_DIR;i++)
+                    {
+                        if( child_dir[i] == NULL )
+                        {
+                            child_dir[i] = dir;
+                            int ret = i;
+                            write(sp->fout, &ret, 4);
+                            break;
+                        }
+                    }
+                    if( i == N_CHILD_DIR )
+                    {
+                        fprintf(stderr, "AccCtrl: too many directories opened\n");
+                        closedir(dir);
+                        int ret = -1;
+                        write(sp->fout, &ret, 4);
+                    }
+                }
+            }
+            free(path);
+        }
+        else if( cmd == CMD_READDIR )
+        {
+            int handle;
+            read(sp->fin, &handle, 4);
+            struct dirent * pent = NULL;
+            int ret;
+            if( handle < 0 || handle >= N_CHILD_DIR || child_dir[handle] == NULL )
+                ret = -1;
+            else
+            {
+                pent = readdir(child_dir[handle]);
+                if( pent == NULL )
+                    ret = -1;
+                else
+                    ret = 0;
+            }
+            write(sp->fout, &ret, 4);
+            if( ret == 0 )
+                write(sp->fout, pent, sizeof(struct dirent));
+        }
+        else if( cmd == CMD_READDIR64 )
+        {
+            int handle;
+            read(sp->fin, &handle, 4);
+            struct dirent64 * pent = NULL;
+            int ret;
+            if( handle < 0 || handle >= N_CHILD_DIR || child_dir[handle] == NULL )
+                ret = -1;
+            else
+            {
+                pent = readdir64(child_dir[handle]);
+                if( pent == NULL )
+                    ret = -1;
+                else
+                    ret = 0;
+            }
+            write(sp->fout, &ret, 4);
+            if( ret == 0 )
+                write(sp->fout, pent, sizeof(struct dirent64));
+        }
+        else if( cmd == CMD_REWINDDIR )
+        {
+            int handle;
+            read(sp->fin, &handle, 4);
+            if( handle < 0 || handle >= N_CHILD_DIR || child_dir[handle] == NULL )
+                ;
+            else
+            {
+                rewinddir(child_dir[handle]);
+            }
+        }
+        else if( cmd == CMD_CLOSEDIR )
+        {
+            int handle;
+            read(sp->fin, &handle, 4);
+            int ret;
+            if( handle < 0 || handle >= N_CHILD_DIR || child_dir[handle] == NULL )
+                ret = -1;
+            else
+            {
+                ret = closedir(child_dir[handle]);
+                child_dir[handle] = NULL;
+            }
+            write(sp->fout, &ret, 4);
+        }
+        else if( cmd == CMD_SELECT_STDIN )
+        {
+            if( child_fd[0] )
+            {
+                fd_set readfds;
+                FD_ZERO(&readfds);
+                FD_SET(0, &readfds);
+                int ret = select(1, &readfds, NULL, NULL, NULL);
+                write(sp->fout, &ret, 4);
+                int isset = FD_ISSET(0, &readfds);
+                write(sp->fout, &isset, 4);
+            }
+            else
+            {
+                int ret = -1;
+                write(sp->fout, &ret, 4);
+                int isset = 0;
+                write(sp->fout, &isset, 4);
+            }
         }
     }
 

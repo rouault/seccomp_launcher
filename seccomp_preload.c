@@ -43,6 +43,7 @@
 #include <sys/types.h>
 #include <sys/utsname.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
 
 #include <unistd.h>
 #include <stdlib.h>
@@ -59,6 +60,7 @@
 #include <time.h>
 #include <wchar.h>
 #include <signal.h>
+#include <setjmp.h>
 
 #include "seccomp_launcher.h"
 
@@ -100,6 +102,10 @@ static struct lconv* p_globale_locale = NULL;
 
 static char szCWD[PATH_MAX] = { 0 };
 static char szReadlinkSelf[PATH_MAX] = { 0 };
+/*
+static int stdin_isatty = 0;
+static int stdout_isatty = 0;
+static int stderr_isatty = 0;*/
 
 /* buffer should be at least 21 byte large (20 + 1) for a 64bit val */
 static void printuint(char* buffer, unsigned long long val)
@@ -136,13 +142,18 @@ static void FATAL_ERROR(const char* pszMsg)
     abort();
 }
 
-
 static void UNIMPLEMENTED(const char* pszMsg)
 {
     DISPLAY("UNIMPLEMENTED", pszMsg);
 }
 
-//#define VERBOSE 1
+static void UNSUPPORTED(const char* pszMsg)
+{
+    DISPLAY("UNSUPPORTED", pszMsg);
+}
+
+#define UNSUPPORTED_FUNC() UNSUPPORTED(__FUNCTION__)
+
 #if VERBOSE
 #define ENTER_FUNC() DISPLAY("ENTER", __FUNCTION__)
 
@@ -320,7 +331,8 @@ static Library libs[] =
     { "osgeo/_gdal.so", NULL },
     { "osgeo/_gdalconst.so", NULL },
     { "osgeo/_ogr.so", NULL },
-    { "osgeo/_osr.so", NULL }
+    { "osgeo/_osr.so", NULL },
+    { "lib-dynload/readline.so", NULL},
 };
 
 #define N_LIBS (sizeof(libs) / sizeof(libs[0]))
@@ -343,6 +355,8 @@ static Symbol syms[] =
     { "osgeo/_ogr.so", "PyInit__ogr", NULL, NULL },
     { "osgeo/_osr.so", "init_osr", NULL, NULL },
     { "osgeo/_osr.so", "PyInit__osr", NULL, NULL },
+    { "lib-dynload/readline.so", "initreadline", NULL, NULL },
+    { "lib-dynload/readline.so", "PyInit_readline", NULL, NULL },
     { "libproj.so", "pj_init", NULL, NULL },
     { "libproj.so", "pj_init_plus", NULL, NULL },
     { "libproj.so", "pj_free", NULL, NULL },
@@ -364,20 +378,24 @@ static void resolveSyms(void)
     size_t i, j;
     char szPythonPath[256];
     char szLocalPythonPath[256];
+    char* pythonpathenv = NULL;
     char* pythonpath = NULL;
     char* pythonlocalpath = NULL;
     if( strstr(szReadlinkSelf, "python") != NULL )
     {
-        pythonpath = getenv("PYTHONPATH");
-        if( (pythonpath == NULL || *pythonpath == '\0') &&
-            strncmp(szReadlinkSelf, "/usr/bin/python", strlen("/usr/bin/python")) == 0 )
+        pythonpathenv = getenv("PYTHONPATH");
+        const char* pszBinPython = strstr(szReadlinkSelf, "/bin/python");
+        if( pszBinPython != NULL )
         {
-            sprintf(szPythonPath, "/usr/lib/%s/dist-packages",
-                    szReadlinkSelf + strlen("/usr/bin/"));
+            strcpy(szPythonPath, szReadlinkSelf);
+            memcpy(szPythonPath + (pszBinPython - szReadlinkSelf + 1), "lib", 3);
             pythonpath = szPythonPath;
-            sprintf(szLocalPythonPath, "/usr/local/lib/%s/dist-packages",
-                    szReadlinkSelf + strlen("/usr/bin/"));
-            pythonlocalpath = szLocalPythonPath;
+            if( strncmp(szReadlinkSelf, "/usr/bin/python", strlen("/usr/bin/python")) == 0 )
+            {
+                sprintf(szLocalPythonPath, "/usr/local/lib/%s/dist-packages",
+                        szReadlinkSelf + strlen("/usr/bin/"));
+                pythonlocalpath = szLocalPythonPath;
+            }
         }
     }
 
@@ -386,20 +404,53 @@ static void resolveSyms(void)
         if( strncmp(libs[i].pszLibName, "osgeo/", 6) == 0 )
         {
             char szPath[1024];
+            if( libs[i].pLibHandle == NULL &&
+                pythonpathenv != NULL && strlen(pythonpathenv) < 512 )
+            {
+                strcpy(szPath, pythonpathenv);
+                strcat(szPath, "/");
+                strcat(szPath, libs[i].pszLibName);
+                libs[i].pLibHandle = dlopen(szPath, RTLD_NOW);
+            }
+            if( libs[i].pLibHandle == NULL &&
+                pythonpath != NULL && strlen(pythonpath) < 512 )
+            {
+                strcpy(szPath, pythonpath);
+                strcat(szPath, "/dist-packages/");
+                strcat(szPath, libs[i].pszLibName);
+                libs[i].pLibHandle = dlopen(szPath, RTLD_NOW);
+            }
+            if( libs[i].pLibHandle == NULL &&
+                pythonpath != NULL && strlen(pythonpath) < 512 )
+            {
+                strcpy(szPath, pythonpath);
+                strcat(szPath, "/site-packages/");
+                strcat(szPath, libs[i].pszLibName);
+                libs[i].pLibHandle = dlopen(szPath, RTLD_NOW);
+            }
+            if( libs[i].pLibHandle == NULL &&
+                pythonlocalpath != NULL && strlen(pythonlocalpath) < 512  )
+            {
+                strcpy(szPath, pythonlocalpath);
+                strcat(szPath, "/");
+                strcat(szPath, libs[i].pszLibName);
+                libs[i].pLibHandle = dlopen(szPath, RTLD_NOW);
+            }
+            /*if( libs[i].pLibHandle == NULL )
+            {
+                fprintf(stderr, "Cannot dlopen(%s) : %s\n",
+                        libs[i].pszLibName, dlerror());
+            }*/
+        }
+        else if( strcmp(libs[i].pszLibName, "lib-dynload/readline.so") == 0 )
+        {
+            char szPath[1024];
             if( pythonpath != NULL && strlen(pythonpath) < 512 )
             {
                 strcpy(szPath, pythonpath);
                 strcat(szPath, "/");
                 strcat(szPath, libs[i].pszLibName);
                 libs[i].pLibHandle = dlopen(szPath, RTLD_NOW);
-                if( libs[i].pLibHandle == NULL &&
-                    pythonlocalpath != NULL && strlen(pythonlocalpath) < 512  )
-                {
-                    strcpy(szPath, pythonlocalpath);
-                    strcat(szPath, "/");
-                    strcat(szPath, libs[i].pszLibName);
-                    libs[i].pLibHandle = dlopen(szPath, RTLD_NOW);
-                }
             }
             /*if( libs[i].pLibHandle == NULL )
             {
@@ -452,6 +503,8 @@ static void* mydlopen (const char *file, int mode, void *dl_caller)
         {
             if( strcmp(file, libs[i].pszLibName) == 0 ||
                 (strncmp(libs[i].pszLibName, "osgeo/", 6) == 0 &&
+                 strstr(file, libs[i].pszLibName) != NULL) ||
+                (strcmp(libs[i].pszLibName, "lib-dynload/readline.so") == 0 &&
                  strstr(file, libs[i].pszLibName) != NULL) )
             {
                 return libs[i].pLibHandle;
@@ -636,6 +689,16 @@ static int dummySortFunction(const void * a, const void *b)
     return 0;
 }
 
+static void pipe_read(void *buf, size_t count)
+{
+    syscall( SYS_read, pipe_in, buf, count);
+}
+
+static void pipe_write(const void *buf, size_t count)
+{
+    syscall( SYS_write, pipe_out, buf, count);
+}
+
 __attribute__((constructor)) static void seccomp_preload_init()
 {
     const char* pipein = getenv("PIPE_IN");
@@ -681,6 +744,15 @@ __attribute__((constructor)) static void seccomp_preload_init()
     /* so do it now before going into seccomp */
     /* The size parameter must be at least 1024 */
     qsort((void*)0xDEADBEEF, 0, 1024, dummySortFunction);
+
+    /* Check if stdin is a tty */
+    /*
+    int (*p_glibc_isatty)(int) = (int(*)(int))dlsym(RTLD_NEXT, "isatty");
+    assert(p_glibc_isatty);
+    assert(p_glibc_isatty != isatty);
+    stdin_isatty = p_glibc_isatty(0);
+    stdout_isatty = p_glibc_isatty(1);
+    stderr_isatty = p_glibc_isatty(2);*/
 
     /* Fetch current working dir */
     char *(*p_glibc_getcwd)(char *buf, size_t size) =
@@ -738,21 +810,13 @@ __attribute__((constructor)) static void seccomp_preload_init()
     {
         DISPLAY("INFO", "should be PR_SET_SECCOMP mode, but no");
     }
+    int cmd = CMD_HAS_SWITCHED_TO_SECCOMP;
+    pipe_write(&cmd, 4);
 
     bInSecomp = TRUE;
 
     /* Use our fake dlopen() and friends */
     _dlfcn_hook = &myhook;
-}
-
-static void pipe_read(void *buf, size_t count)
-{
-    syscall( SYS_read, pipe_in, buf, count);
-}
-
-static void pipe_write(const void *buf, size_t count)
-{
-    syscall( SYS_write, pipe_out, buf, count);
 }
 
 static void pipe_write_uint16(unsigned short val)
@@ -901,7 +965,6 @@ ssize_t readlink(const char *path, char *buf, size_t bufsiz)
     else
     {
         UNIMPLEMENTED_FUNC();
-        DISPLAY("path", path);
         errno = EINVAL;
         return -1;
     }
@@ -1076,6 +1139,22 @@ gid_t getegid(void)
 int select(int nfds, fd_set *readfds, fd_set *writefds,
             fd_set *exceptfds, struct timeval *timeout)
 {
+    if( nfds == 1 && readfds != NULL && writefds == NULL && exceptfds == NULL &&
+        timeout == NULL )
+    {
+        int cmd = CMD_SELECT_STDIN;
+        pipe_write(&cmd, 4);
+        int ret;
+        pipe_read(&ret, 4);
+        int isset;
+        pipe_read(&isset, 4);
+        if( isset )
+            FD_SET(0, readfds);
+        else
+            FD_CLR(0, readfds);
+        return ret;
+    }
+
     UNIMPLEMENTED_FUNC();
     return -1;
 }
@@ -1333,6 +1412,146 @@ __off64_t lseek64(int fd, __off64_t offset, int whence)
 
     return (__off64_t)ret;
 }
+
+int fsync(int fd)
+{
+    UNIMPLEMENTED_FUNC();
+    return 0;
+}
+
+int fdatasync(int fd)
+{
+    UNIMPLEMENTED_FUNC();
+    return 0;
+}
+
+typedef struct
+{
+    int server_handle;
+} MYDIR;
+
+
+DIR *opendir(const char *name)
+{
+    ENTER_FUNC();
+
+    int len = strlen(name);
+    if( len >= 65536 )
+    {
+        errno = ENAMETOOLONG;
+        return NULL;
+    }
+
+    int cmd = CMD_OPENDIR;
+    pipe_write(&cmd, 4);
+    pipe_write_uint16(len);
+    pipe_write(name, len);
+
+    int server_handle;
+    pipe_read(&server_handle, 4);
+
+    if( server_handle < 0 )
+        return NULL;
+
+    MYDIR* mydir = (MYDIR*) malloc(sizeof(MYDIR));
+    mydir->server_handle = server_handle;
+    return (DIR*) mydir;
+}
+
+struct dirent ent;
+
+struct dirent *readdir(DIR *dirp)
+{
+    struct dirent* ret;
+    readdir_r(dirp, &ent, &ret);
+    return ret;
+}
+
+int readdir_r(DIR *dirp, struct dirent *entry, struct dirent **result)
+{
+    ENTER_FUNC();
+
+    MYDIR* mydir = (MYDIR*) dirp;
+
+    int cmd = CMD_READDIR;
+    pipe_write(&cmd, 4);
+    pipe_write(&mydir->server_handle, 4);
+    int ret;
+    pipe_read(&ret, 4);
+    if( ret == 0 )
+    {
+        pipe_read(entry, sizeof(struct dirent));
+        *result = entry;
+        return 0;
+    }
+    else
+    {
+        *result = NULL;
+        return -1;
+    }
+}
+
+struct dirent64 ent64;
+
+struct dirent64 *readdir64(DIR *dirp)
+{
+    struct dirent64* ret;
+    readdir64_r(dirp, &ent64, &ret);
+    return ret;
+}
+
+int readdir64_r(DIR *dirp, struct dirent64 *entry, struct dirent64 **result)
+{
+    ENTER_FUNC();
+
+    MYDIR* mydir = (MYDIR*) dirp;
+
+    int cmd = CMD_READDIR64;
+    pipe_write(&cmd, 4);
+    pipe_write(&mydir->server_handle, 4);
+    int ret;
+    pipe_read(&ret, 4);
+    if( ret == 0 )
+    {
+        pipe_read(entry, sizeof(struct dirent64));
+        *result = entry;
+        return 0;
+    }
+    else
+    {
+        *result = NULL;
+        return -1;
+    }
+}
+
+
+void rewinddir(DIR *dirp)
+{
+    ENTER_FUNC();
+
+    MYDIR* mydir = (MYDIR*) dirp;
+
+    int cmd = CMD_REWINDDIR;
+    pipe_write(&cmd, 4);
+    pipe_write(&mydir->server_handle, 4);
+}
+
+
+int closedir(DIR *dirp)
+{
+    ENTER_FUNC();
+
+    MYDIR* mydir = (MYDIR*) dirp;
+
+    int cmd = CMD_CLOSEDIR;
+    pipe_write(&cmd, 4);
+    pipe_write(&mydir->server_handle, 4);
+    int ret;
+    pipe_read(&ret, 4);
+    free(mydir);
+    return ret;
+}
+
 
 
 int pthread_key_create(void* ignored1, void* ignored2)
@@ -1679,13 +1898,6 @@ int sem_trywait()
     return 0;
 }
 
-DIR *opendir(const char *name)
-{
-    UNIMPLEMENTED_FUNC();
-    return NULL;
-}
-
-
 #define BUFFERSIZE  4096
 
 typedef struct
@@ -1705,6 +1917,7 @@ FILE *fopen(const char *path, const char *mode)
 {
     int fd = -1;
     long long offset = 0;
+    ENTER_FUNC();
 
     if( strchr(mode, 'r') && strchr(mode, '+') )
         fd = open(path, O_RDWR, 0);
@@ -2201,26 +2414,86 @@ int mkdir(const char *pathname, mode_t mode)
 
 int unlink(const char *pathname)
 {
-    UNIMPLEMENTED_FUNC();
-    return -1;
+    ENTER_FUNC();
+
+    int len = strlen(pathname);
+    if( len >= 65536 )
+    {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    int cmd = CMD_UNLINK;
+    pipe_write(&cmd, 4);
+    pipe_write_uint16(len);
+    pipe_write(pathname, len);
+
+    int ret;
+    pipe_read(&ret, 4);
+    int myerrno = 0;
+    if( ret < 0 )
+        pipe_read(&myerrno, 4);
+    errno = myerrno;
+
+    return ret;
 }
 
 int remove(const char *pathname)
 {
-    UNIMPLEMENTED_FUNC();
-    return 0; /* FIXME */
+    ENTER_FUNC();
+
+    int len = strlen(pathname);
+    if( len >= 65536 )
+    {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    int cmd = CMD_REMOVE;
+    pipe_write(&cmd, 4);
+    pipe_write_uint16(len);
+    pipe_write(pathname, len);
+
+    int ret;
+    pipe_read(&ret, 4);
+    int myerrno = 0;
+    if( ret < 0 )
+        pipe_read(&myerrno, 4);
+    errno = myerrno;
+
+    return ret;
 }
 
 int rmdir(const char *pathname)
 {
-    UNIMPLEMENTED_FUNC();
-    return -1;
+    ENTER_FUNC();
+
+    int len = strlen(pathname);
+    if( len >= 65536 )
+    {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    int cmd = CMD_RMDIR;
+    pipe_write(&cmd, 4);
+    pipe_write_uint16(len);
+    pipe_write(pathname, len);
+
+    int ret;
+    pipe_read(&ret, 4);
+    int myerrno = 0;
+    if( ret < 0 )
+        pipe_read(&myerrno, 4);
+    errno = myerrno;
+
+    return ret;
 }
 
 int access(const char *pathname, int mode)
 {
     UNIMPLEMENTED_FUNC();
-    return -1;
+    return 0;
 }
 
 int gettimeofday(struct timeval *tv, struct timezone *tz)
@@ -2357,6 +2630,11 @@ int fprintf(FILE* f, const char *format, ...)
     return ret;
 }
 
+int __vfprintf_chk(FILE * fp, int flag, const char * format, va_list ap)
+{
+    return vfprintf(fp, format, ap);
+}
+
 int vfprintf(FILE *f, const char *format, va_list ap)
 {
     va_list wrk_args;
@@ -2445,8 +2723,45 @@ int ioctl (int __fd, unsigned long int __request, ...)
     return -1;
 }
 
+
+sighandler_t signal(int signum, sighandler_t handler)
+{
+    UNIMPLEMENTED_FUNC();
+    return 0;
+}
+
+int sigsetjmp(sigjmp_buf env, int savemask)
+{
+    UNIMPLEMENTED_FUNC();
+    return 0;
+}
+
 int sigaction(int signum, const struct sigaction *act,
                 struct sigaction *oldact)
+{
+    UNIMPLEMENTED_FUNC();
+    return 0;
+}
+
+int sigemptyset(sigset_t *set)
+{
+    UNIMPLEMENTED_FUNC();
+    return 0;
+}
+
+int sigaddset(sigset_t *set, int signo)
+{
+    UNIMPLEMENTED_FUNC();
+    return 0;
+}
+
+int sigdelset(sigset_t *set, int signo)
+{
+    UNIMPLEMENTED_FUNC();
+    return 0;
+}
+
+int sigprocmask(int how, const sigset_t *set, sigset_t *oldset)
 {
     UNIMPLEMENTED_FUNC();
     return 0;
@@ -2466,6 +2781,26 @@ int tcsetattr(void)
 
 int isatty(int fd)
 {
-    UNIMPLEMENTED_FUNC();
+    if( fd == 0 || fd == 1 || fd == 2 )
+        return 1;
     return 0;
+}
+
+pid_t fork(void)
+{
+    UNSUPPORTED_FUNC();
+    return -1;
+}
+
+int execve(const char *filename, char *const argv[],
+                  char *const envp[])
+{
+    UNSUPPORTED_FUNC();
+    return -1;
+}
+
+int getrusage(int who, struct rusage *usage)
+{
+    UNIMPLEMENTED_FUNC();
+    return -1;
 }
