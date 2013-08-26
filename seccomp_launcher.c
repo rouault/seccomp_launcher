@@ -711,6 +711,7 @@ int main(int argc, char* argv[])
             unsigned short len;
             read(sp->fin, &len, sizeof(len));
             char* path = (char*)malloc(len + 1);
+            assert(path);
             read(sp->fin, path, len);
             path[len] = 0;
             int flags;
@@ -776,6 +777,7 @@ int main(int argc, char* argv[])
             int len;
             read(sp->fin, &len, 4);
             char* buffer = (char*)malloc(len);
+            assert(buffer);
             int ret = (int)read(fd, buffer, len);
             int myerrno = errno;
             write(sp->fout, &ret, 4);
@@ -794,6 +796,7 @@ int main(int argc, char* argv[])
             int len;
             read(sp->fin, &len, 4);
             char* buffer = (char*)malloc(len);
+            assert(buffer);
             read(sp->fin, buffer, len);
             int ret = (int)write(fd, buffer, len);
             int myerrno = errno;
@@ -823,6 +826,7 @@ int main(int argc, char* argv[])
             unsigned short len;
             read(sp->fin, &len, sizeof(len));
             char* path = (char*)malloc(len+1);
+            assert(path);
             read(sp->fin, path, len);
             path[len] = '\0';
             struct stat64 mystat;
@@ -855,6 +859,7 @@ int main(int argc, char* argv[])
             unsigned short len;
             read(sp->fin, &len, sizeof(len));
             char* path = (char*)malloc(len+1);
+            assert(path);
             read(sp->fin, path, len);
             path[len] = '\0';
             int mode;
@@ -895,6 +900,7 @@ int main(int argc, char* argv[])
             unsigned short len;
             read(sp->fin, &len, sizeof(len));
             char* path = (char*)malloc(len+1);
+            assert(path);
             read(sp->fin, path, len);
             path[len] = '\0';
             int ret;
@@ -996,6 +1002,7 @@ int main(int argc, char* argv[])
             unsigned short len;
             read(sp->fin, &len, sizeof(len));
             char* path = (char*)malloc(len + 1);
+            assert(path);
             read(sp->fin, path, len);
             path[len] = 0;
             if( bInSecComp && (eMode == MODE_RO || eMode == MODE_RW) &&
